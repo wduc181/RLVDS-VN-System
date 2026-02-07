@@ -1,0 +1,33 @@
+# Environment setup for Ubuntu 22.04:
+# 1. Create environment: conda create -n lpr_env python=3.10 -y
+# 2. Activate environment: conda activate lpr_env
+# 3. Install dependencies: pip install -r requirements.txt
+
+# Core Machine Learning & AI
+torch>=2.2.0
+torchvision>=0.17.0
+paddlepaddle==2.6.2
+paddleocr>=2.7.0
+# tensorflow==2.15.0
+# keras==2.15.0
+
+# Image Processing & Computer Vision
+opencv-python>=4.9.0.80
+pillow>=10.2.0
+
+# Data Analysis & Logic
+numpy>=1.26.0
+pandas>=2.2.0
+scikit-learn>=1.4.0
+scipy>=1.12.0
+
+# Web Interface & Visualization
+streamlit>=1.35.0
+matplotlib>=3.8.0
+seaborn>=0.13.0
+
+# Utilities
+pyyaml>=6.0.1
+requests>=2.31.0
+requests-oauthlib>=2.0.0
+tqdm>=4.66.0

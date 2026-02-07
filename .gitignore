@@ -1,0 +1,40 @@
+# --- Python & Environments ---
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.env
+.venv/
+
+# --- AI Models & Weights ---
+weights/*.pt
+weights/*.onnx
+weights/*.engine
+# Giữ lại thư mục weights nhưng bỏ qua file bên trong
+!weights/.gitkeep
+
+# --- Project Data & Database ---
+data/*.db
+data/*.db-journal
+
+data/samples/*
+data/violations/*
+!data/samples/.gitkeep
+!data/violations/.gitkeep
+
+# --- IDEs & Editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Machine Learning Logs (YOLOv5) ---
+runs/
+wandb/
+
+# --- OS Specific ---
+.DS_Store
+
+# --- MISC ---
+.github/copilot-instructions.md

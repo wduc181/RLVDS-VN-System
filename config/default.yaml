@@ -1,0 +1,46 @@
+# RLVDS-VN Default Configuration
+# ===============================
+#
+# File này chứa cấu hình mặc định cho hệ thống.
+# Có thể override bằng environment variables (prefix: RLVDS_)
+#
+# TODO:
+#   [ ] Điền các giá trị mặc định phù hợp
+#   [ ] Tạo file config/local.yaml cho development
+#   [ ] Document các biến môi trường có thể override
+
+# --- Detection (YOLOv5) ---
+detection:
+  model_path: "weights/license_plate.pt"
+  confidence_threshold: 0.5
+  device: "cuda:0"
+
+# --- Tracking ---
+tracking:
+  enabled: true
+  max_age: 30
+  iou_threshold: 0.3
+
+# --- Spatial (Vùng vi phạm) ---
+spatial:
+  violation_zone: []  # [[x1,y1], [x2,y2], ...]
+  zone_color: [0, 0, 255]
+
+# --- Temporal (Đèn giao thông) ---
+temporal:
+  red_duration_sec: 30
+  green_duration_sec: 30
+  yellow_duration_sec: 3
+
+# --- OCR (PaddleOCR) ---
+ocr:
+  lang: "en"
+  use_gpu: true
+
+# --- Database ---
+database:
+  url: "sqlite:///data/rlvds.db"
+
+# --- Global ---
+debug: false
+log_level: "INFO"
