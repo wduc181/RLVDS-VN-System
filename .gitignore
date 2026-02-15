@@ -32,6 +32,7 @@ data/violations/*
 # --- Machine Learning Logs (YOLOv5) ---
 runs/
 wandb/
+logs/
 
 # --- OS Specific ---
 .DS_Store
