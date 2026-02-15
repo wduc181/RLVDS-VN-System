@@ -36,5 +36,9 @@ wandb/
 # --- OS Specific ---
 .DS_Store
 
+# --- Local Config (dev overrides) ---
+config/local.yaml
+
 # --- MISC ---
 .github/copilot-instructions.md
+.github/sample/

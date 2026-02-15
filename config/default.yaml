@@ -2,44 +2,67 @@
 # ===============================
 #
 # File này chứa cấu hình mặc định cho hệ thống.
-# Có thể override bằng environment variables (prefix: RLVDS_)
+# Có thể override bằng:
+#   - file config/local.yaml (gitignored)
+#   - Environment variables (prefix: RLVDS_)
 #
-# TODO:
-#   [ ] Điền các giá trị mặc định phù hợp
-#   [ ] Tạo file config/local.yaml cho development
-#   [ ] Document các biến môi trường có thể override
+# Ví dụ env override:
+#   RLVDS_DETECTION__CONFIDENCE_THRESHOLD=0.6
+#   RLVDS_DEBUG=true
+
+# --- Video / Ingestion ---
+video:
+  source: "data/samples/sample.mp4"   # Đường dẫn video hoặc camera index (0, 1, ...)
+  width: 1280                          # Resolution width
+  height: 720                          # Resolution height
+  fps: 30                             # Target FPS (0 = không giới hạn)
+  buffer_size: 10                     # Số frame tối đa trong buffer
 
 # --- Detection (YOLOv5) ---
 detection:
-  model_path: "weights/license_plate.pt"
-  confidence_threshold: 0.5
-  device: "cuda:0"
+  model_path: "weights/license_plate.pt"   # Đường dẫn đến file weights
+  confidence_threshold: 0.5                # Ngưỡng confidence (0.0–1.0)
+  iou_threshold: 0.45                      # Ngưỡng IoU cho NMS
+  image_size: 640                          # Input size cho model
+  device: "auto"                           # "auto" | "cuda:0" | "cpu"
 
 # --- Tracking ---
 tracking:
   enabled: true
-  max_age: 30
-  iou_threshold: 0.3
+  max_age: 30           # Số frame giữ track khi mất detection
+  min_hits: 3           # Số frame tối thiểu để xác nhận track
+  iou_threshold: 0.3    # Ngưỡng IoU cho matching
 
 # --- Spatial (Vùng vi phạm) ---
 spatial:
-  violation_zone: []  # [[x1,y1], [x2,y2], ...]
-  zone_color: [0, 0, 255]
+  violation_zone: []         # Polygon vertices: [[x1,y1], [x2,y2], ...]
+  zone_color: [0, 0, 255]   # BGR color cho hiển thị polygon
+  zone_thickness: 2          # Độ dày nét vẽ polygon
 
 # --- Temporal (Đèn giao thông) ---
 temporal:
   red_duration_sec: 30
   green_duration_sec: 30
   yellow_duration_sec: 3
+  initial_state: "RED"       # Trạng thái khởi tạo: RED | GREEN | YELLOW
 
 # --- OCR (PaddleOCR) ---
 ocr:
   lang: "en"
   use_gpu: true
+  det_model_dir: ""          # Để trống = tự download model mặc định
+  rec_model_dir: ""          # Để trống = tự download model mặc định
+  confidence_threshold: 0.6  # Ngưỡng confidence cho OCR result
 
 # --- Database ---
 database:
   url: "sqlite:///data/rlvds.db"
+
+# --- Paths ---
+paths:
+  violations_dir: "data/violations"    # Thư mục lưu ảnh bằng chứng
+  weights_dir: "weights"               # Thư mục chứa model weights
+  samples_dir: "data/samples"          # Thư mục video mẫu
 
 # --- Global ---
 debug: false
