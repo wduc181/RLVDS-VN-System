@@ -1,40 +1,58 @@
 """
-Violation Zone Definitions
-==========================
+Violation Zones
+================
 
 Mục đích:
-    Định nghĩa và quản lý các vùng vi phạm trên mặt đường.
+    Quản lý các vùng đa giác (polygon zones) dùng để xác định
+    khu vực giám sát vi phạm tại ngã tư.
 
-Input:
-    - vertices: list[tuple[int, int]] (polygon points)
-    - zone_id: str (tên zone)
-    - zone_type: str (violation, warning, safe)
+Tham chiếu sample code:
+    - .github/sample/camera.py (dòng 40-41) — hardcoded polygon points
+    - config/default.yaml → spatial.violation_zone — configurable polygon
 
-Output:
-    - ViolationZone object với các methods check
+Thư viện sử dụng:
+    - numpy: Array operations
+    - rlvds.spatial.polygon: Các hàm polygon utility
 
-Classes cần implement:
-    1. ViolationZone(BaseSpatialReasoner)
-       - __init__(zone_id: str, vertices: list[tuple])
-       - is_in_zone(point: tuple) -> bool
-       - is_in_zone_bbox(bbox: BoundingBox) -> bool
-       - set_zone(vertices: list[tuple]) -> None
-       - get_vertices() -> list[tuple]
-    
-    2. ZoneManager
-       - __init__()
-       - add_zone(zone: ViolationZone) -> None
-       - remove_zone(zone_id: str) -> None
-       - check_all_zones(point: tuple) -> list[str]
+===========================================================================
+ViolationZone class
+===========================================================================
 
-Cách check violation với bbox:
-    - Option 1: Check center point của bbox
-    - Option 2: Check bottom-center (chân xe)
-    - Option 3: Check nếu bbox overlap với zone
+Class cần implement:
+
+1. ViolationZone
+   - __init__(vertices: list[list[int]], zone_id: str = "default",
+              color: tuple = (0, 0, 255), thickness: int = 2)
+     + Lưu vertices
+     + Tạo polygon np.ndarray bằng create_polygon() từ spatial/polygon.py
+     + Lưu zone_id, color, thickness
+
+   - contains(point: tuple[float, float]) -> bool
+     + Kiểm tra point có nằm trong zone
+     + Gọi point_in_polygon() từ spatial/polygon.py
+
+   - apply_mask(frame: np.ndarray) -> np.ndarray
+     + Tạo masked frame chỉ giữ vùng zone
+     + Gọi create_mask() từ spatial/polygon.py
+
+   - draw(frame: np.ndarray) -> np.ndarray
+     + Vẽ viền zone lên frame
+     + Gọi draw_polygon() từ spatial/polygon.py
+
+   Vertices mặc định (từ camera.py dòng 40):
+     [[1000, 700], [1700, 700], [1900, 1078], [800, 1078]]
+   
+   Lưu ý: vertices phụ thuộc vào video/camera cụ thể
+   → Cần configurable qua config/default.yaml hoặc UI
+
+2. ZoneManager (optional)
+   - Quản lý nhiều zones nếu có nhiều vùng giám sát
+   - load_zones_from_config(config: SpatialConfig) -> list[ViolationZone]
 
 TODO:
-    [ ] Implement ViolationZone class
-    [ ] Quyết định cách check violation (center vs bottom)
-    [ ] Add method để vẽ zone lên frame
-    [ ] Support load zones từ config/JSON
+    [ ] Import numpy, các hàm từ spatial.polygon
+    [ ] Implement class ViolationZone
+    [ ] Implement contains(), apply_mask(), draw()
+    [ ] Load vertices từ config hoặc hardcode mặc định
+    [ ] Test: tạo zone → kiểm tra contains() với điểm inside/outside
 """

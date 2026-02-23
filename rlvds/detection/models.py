@@ -3,31 +3,24 @@ Detection Models
 ================
 
 Mục đích:
-    Định nghĩa dataclasses cho detection results.
+    Re-export Detection dataclass từ core/base.py.
+    Module này tồn tại để giữ cấu trúc package rõ ràng.
 
-Thư viện sử dụng:
-    - dataclasses: Python dataclasses
+Lưu ý:
+    Detection, Track, Violation đã được định nghĩa đầy đủ tại:
+        rlvds/core/base.py
 
-Dataclasses cần định nghĩa:
-    1. BoundingBox
-       - x1: int (top-left x)
-       - y1: int (top-left y)
-       - x2: int (bottom-right x)
-       - y2: int (bottom-right y)
-       
-       Methods:
-       - center() -> tuple[int, int]
-       - area() -> int
-       - crop(image: np.ndarray) -> np.ndarray
-    
-    2. Detection
-       - bbox: BoundingBox
-       - confidence: float
-       - class_id: int = 0
-       - timestamp: float = None
+    KHÔNG cần tạo lại BoundingBox riêng — Detection đã có:
+        - bbox: tuple[x1, y1, x2, y2]
+        - get_anchor_point() -> (cx, y2)
+        - center() -> (cx, cy)
+        - area() -> int
+        - crop(frame) -> np.ndarray
 
 TODO:
-    [ ] Sử dụng @dataclass decorator
-    [ ] Implement helper methods cho BoundingBox
-    [ ] Add __repr__ cho debug logging
+    [ ] Import và re-export Detection từ core.base
+    [ ] Nếu cần thêm dataclass riêng cho detection module, định nghĩa ở đây
+    [ ] Ví dụ re-export:
+        from rlvds.core.base import Detection, Track, Violation
+        __all__ = ["Detection", "Track", "Violation"]
 """

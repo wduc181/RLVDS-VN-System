@@ -3,33 +3,46 @@ Frame Buffer
 =============
 
 Mục đích:
-    Buffer frames cho smooth processing và preprocessing.
+    Buffer frames để xử lý async hoặc skip frames tăng performance.
 
-Thư viện sử dụng:
-    - opencv-python (cv2): Image processing
-    - numpy: Array operations
+Lưu ý:
+    Sample code (.github/sample/camera.py) KHÔNG dùng frame buffer.
+    Module này là optional — implement nếu cần tối ưu performance.
 
-Input:
-    - frames từ VideoSource
-    - preprocessing config (resize, normalize, etc.)
+Tham chiếu:
+    - config/settings.py → VideoConfig.buffer_size (default=10)
+    - config/settings.py → VideoConfig.fps (0 = không giới hạn)
 
-Output:
-    - Processed frames ready for detection
+===========================================================================
+Class cần implement (optional):
+===========================================================================
 
-Classes cần implement:
-    1. FrameBuffer
-       - __init__(buffer_size: int = 30)
-       - add(frame: np.ndarray) -> None
-       - get_latest() -> np.ndarray | None
-       - preprocess(frame: np.ndarray) -> np.ndarray
+1. FrameBuffer
+   - __init__(max_size: int = 10)
+     + Dùng collections.deque(maxlen=max_size)
 
-Preprocessing steps:
-    1. Resize to model input size (nếu cần)
-    2. Color space conversion (BGR -> RGB nếu model yêu cầu)
-    3. Normalization
+   - put(frame: np.ndarray) -> None
+     + Thêm frame vào buffer
+
+   - get() -> np.ndarray | None
+     + Lấy frame mới nhất (hoặc cũ nhất tùy strategy)
+
+   - skip_frames(source: VideoSource, skip: int) -> Generator
+     + Chỉ yield mỗi N frame để giảm tải:
+       for i, frame in enumerate(source):
+           if i % skip == 0:
+               yield frame
+
+   - is_full() -> bool
+   - clear() -> None
+
+Khi nào dùng:
+    - Video FPS cao (60fps) nhưng chỉ cần xử lý 10-15fps
+    - Camera realtime + detector chậm → buffer giữ frame mới nhất
 
 TODO:
-    [ ] Implement circular buffer với collections.deque
-    [ ] Preprocessing cho YOLOv5 input
-    [ ] Thread-safe nếu dùng multi-threading
+    [ ] Import collections.deque
+    [ ] Implement class FrameBuffer
+    [ ] Implement skip_frames()
+    [ ] (Optional) Thread-safe buffer với threading.Lock
 """
