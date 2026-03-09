@@ -6,11 +6,6 @@ Mục đích:
     Vẽ bounding boxes, text, polygon zones, và annotations lên frame
     để hiển thị kết quả detection/violation trên video output.
 
-Tham chiếu sample code:
-    - .github/sample/utils/helper.py::draw_text (dòng 20-26)
-    - .github/sample/utils/helper.py::set_hd_resolution (dòng 9-18)
-    - .github/sample/camera.py (dòng 59, 70, 77, 122, 124) — drawing calls
-
 Thư viện sử dụng:
     - opencv-python (cv2): Drawing functions
 """

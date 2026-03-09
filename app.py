@@ -8,99 +8,128 @@ Mục đích:
 
 Cách chạy:
     streamlit run app.py
-
-Tham chiếu:
-    - .github/sample/camera.py — logic hiển thị (cv2.imshow)
-    - Ta thay cv2.imshow bằng Streamlit components
-
-Thư viện sử dụng:
-    - streamlit: Web framework
-    - Các modules từ rlvds package
-
-Layout:
-    ┌─────────────────────────────────────────┐
-    │  🚦 RLVDS-VN Dashboard  (Header)       │
-    ├─────────────────────┬───────────────────┤
-    │                     │  Traffic Light    │
-    │   Video Stream      │  Status           │
-    │   (st.image)        │───────────────────│
-    │                     │  Zone Config      │
-    ├─────────────────────┴───────────────────┤
-    │  Violation History Table                │
-    │  - Plate | Time | Image | Confidence    │
-    └─────────────────────────────────────────┘
-
-Pages/Components:
-    1. Sidebar
-       - Video source selection (file upload hoặc camera)
-       - Start/Stop controls
-       - Traffic light timing config
-    
-    2. Main Area
-       - Video stream với annotations (st.image + loop)
-       - Traffic light indicator (colored circle)
-    
-    3. Bottom
-       - Violation history table (st.dataframe)
-       - Statistics: total violations, unique plates, etc.
-
-Pseudocode:
-    ```
-    import streamlit as st
-    from config.settings import get_settings
-    from rlvds.core.pipeline import Pipeline
-    from rlvds.persistence.database import Database
-    from rlvds.persistence.repository import ViolationRepository
-
-    def main():
-        st.set_page_config(page_title="RLVDS-VN", layout="wide")
-        st.title("🚦 RLVDS-VN: Hệ thống Phát hiện Vi phạm Giao thông")
-
-        # Sidebar controls
-        with st.sidebar:
-            video_file = st.file_uploader("Upload video", type=["mp4", "avi"])
-            camera_id = st.number_input("Camera ID", min_value=0, value=0)
-            start_btn = st.button("▶ Start")
-            stop_btn = st.button("⏹ Stop")
-
-        # Main area
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            video_placeholder = st.empty()  # cho video stream
-        with col2:
-            light_placeholder = st.empty()  # cho traffic light status
-
-        # Violation history
-        st.subheader("📋 Lịch sử vi phạm")
-        db = Database()
-        repo = ViolationRepository(db)
-        violations = repo.get_all()
-        st.dataframe(violations)
-
-    if __name__ == "__main__":
-        main()
-    ```
-
-TODO:
-    [ ] Setup Streamlit page config
-    [ ] Implement sidebar controls
-    [ ] Display video stream (st.image trong loop)
-    [ ] Show traffic light status
-    [ ] Show violation history từ database (st.dataframe)
-    [ ] Add zone drawing tool (st.canvas hoặc manual input)
-    [ ] Add export violations feature (CSV download)
-    [ ] Add statistics dashboard
 """
 
-# import streamlit as st
+import time
+from pathlib import Path
+
+import cv2
+import streamlit as st
+
+from config.settings import get_settings
+from rlvds.ingestion.video_source import VideoSource
+from rlvds.utils.logger import get_logger
+from rlvds.utils.visualization import draw_fps, set_hd_resolution
+
+logger = get_logger(__name__)
 
 
-def main():
+def _list_sample_videos(samples_dir: str) -> list[str]:
+    """Trả về danh sách file video trong thư mục samples."""
+    p = Path(samples_dir)
+    if not p.is_dir():
+        return []
+    exts = {".mp4", ".avi", ".mkv", ".mov"}
+    return sorted(str(f) for f in p.iterdir() if f.suffix.lower() in exts)
+
+
+def main() -> None:
     """Streamlit app main function."""
-    # TODO: Implement theo pseudocode ở trên
-    # st.set_page_config(page_title="RLVDS-VN", layout="wide")
-    # st.title("🚦 RLVDS-VN: Hệ thống Phát hiện Vi phạm Giao thông")
-    pass
+    st.set_page_config(page_title="RLVDS-VN", layout="wide")
+    st.title("🚦 RLVDS-VN — Video Stream Test")
+
+    settings = get_settings()
+
+    # ── Sidebar ──────────────────────────────────────────────────────
+    with st.sidebar:
+        st.header("⚙️ Video Source")
+
+        sample_videos = _list_sample_videos(settings.paths.samples_dir)
+        source_path = st.selectbox(
+            "Chọn video mẫu",
+            options=sample_videos,
+            index=0 if sample_videos else None,
+            help="Chọn file trong data/samples/",
+        )
+
+        display_width = st.slider(
+            "Display width (px)", 480, 1920, 1280, step=80,
+        )
+
+        show_fps = st.checkbox("Hiển thị FPS", value=True)
+
+        start = st.button("▶ Start", use_container_width=True)
+        stop = st.button("⏹ Stop", use_container_width=True)
+
+    # ── Main area ────────────────────────────────────────────────────
+    video_placeholder = st.empty()
+    metrics_col1, metrics_col2, metrics_col3 = st.columns(3)
+    fps_display = metrics_col1.empty()
+    frame_count_display = metrics_col2.empty()
+    resolution_display = metrics_col3.empty()
+
+    # ── State management ─────────────────────────────────────────────
+    if stop:
+        st.session_state["running"] = False
+
+    if start and source_path:
+        st.session_state["running"] = True
+
+    if not st.session_state.get("running", False):
+        st.info("Nhấn **▶ Start** để bắt đầu stream video.")
+        return
+
+    # ── Video loop ───────────────────────────────────────────────────
+    if not source_path:
+        st.warning("Không tìm thấy video mẫu trong data/samples/")
+        return
+
+    try:
+        src = VideoSource(source_path)
+    except (FileNotFoundError, RuntimeError) as exc:
+        st.error(f"Không thể mở video: {exc}")
+        return
+
+    w, h = src.get_frame_size()
+    resolution_display.metric("Resolution", f"{w}×{h}")
+    total_frames = src.get_frame_count()
+    logger.info("Streaming %s — %d frames, %dx%d", source_path, total_frames, w, h)
+
+    prev_time = time.perf_counter()
+    frame_idx = 0
+
+    try:
+        for frame in src:
+            if not st.session_state.get("running", False):
+                break
+
+            # FPS tính toán
+            now = time.perf_counter()
+            dt = now - prev_time
+            fps = int(1 / dt) if dt > 0 else 0
+            prev_time = now
+            frame_idx += 1
+
+            # Vẽ FPS lên frame nếu được bật
+            if show_fps:
+                draw_fps(frame, fps)
+
+            # Resize cho hiển thị
+            display_frame = set_hd_resolution(frame, width=display_width)
+
+            # BGR → RGB cho Streamlit
+            display_frame = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
+
+            # Cập nhật UI
+            video_placeholder.image(display_frame, channels="RGB")
+            fps_display.metric("FPS", fps)
+            frame_count_display.metric("Frame", f"{frame_idx}/{total_frames}")
+    finally:
+        src.release()
+        logger.info("Video source released after %d frames", frame_idx)
+
+    st.session_state["running"] = False
+    st.success(f"Hoàn tất — đã xử lý {frame_idx} frames.")
 
 
 if __name__ == "__main__":
