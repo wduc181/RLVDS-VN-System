@@ -35,6 +35,7 @@ from typing import Iterator, Optional, Union
 
 import cv2
 import numpy as np
+from typing_extensions import override
 
 from rlvds.core.base import BaseVideoSource
 from rlvds.utils.logger import get_logger
@@ -61,17 +62,25 @@ class VideoSource(BaseVideoSource):
         *,
         max_read_failures: int = 20,
         reconnect_interval_sec: float = 0.5,
+        max_reconnect_attempts: int = 10,
     ) -> None:
         if max_read_failures < 1:
             raise ValueError("max_read_failures must be >= 1")
         if reconnect_interval_sec < 0:
             raise ValueError("reconnect_interval_sec must be >= 0")
+        if max_reconnect_attempts < 1:
+            raise ValueError("max_reconnect_attempts must be >= 1")
 
         self.source: Source = source
-        self._resolved_source: Source = self._normalize_source(source)
+        try:
+            self._resolved_source: Source = self._normalize_source(source)
+        except FileNotFoundError:
+            logger.error("Video source path does not exist: %r", source)
+            raise
         self._is_stream: bool = self._detect_stream(self._resolved_source)
         self._max_read_failures = max_read_failures
         self._reconnect_interval_sec = reconnect_interval_sec
+        self._max_reconnect_attempts = max_reconnect_attempts
 
         self.cap: cv2.VideoCapture = cv2.VideoCapture(self._resolved_source)
         if not self.cap.isOpened():
@@ -92,11 +101,13 @@ class VideoSource(BaseVideoSource):
     def iter_frames(self) -> Iterator[np.ndarray]:
         """Yield frames continuously with basic failure tolerance."""
         failures = 0
+        reconnect_attempts = 0
 
         while True:
             ok, frame = self.read_frame()
             if ok and frame is not None:
                 failures = 0
+                reconnect_attempts = 0
                 yield frame
                 continue
 
@@ -109,6 +120,14 @@ class VideoSource(BaseVideoSource):
             # Stream input: force reopen after hitting max consecutive failures,
             # even if isOpened() still returns True (common with RTSP/HTTP glitches).
             if failures >= self._max_read_failures:
+                reconnect_attempts += 1
+                if reconnect_attempts > self._max_reconnect_attempts:
+                    logger.error(
+                        "Stream permanently lost for source %r after %d reconnect attempts",
+                        self.source,
+                        reconnect_attempts - 1,
+                    )
+                    break
                 self._safe_reopen()
                 if not self.is_opened():
                     break
@@ -116,12 +135,21 @@ class VideoSource(BaseVideoSource):
                 continue
 
             if not self.is_opened():
+                reconnect_attempts += 1
+                if reconnect_attempts > self._max_reconnect_attempts:
+                    logger.error(
+                        "Stream permanently lost for source %r after %d reconnect attempts",
+                        self.source,
+                        reconnect_attempts - 1,
+                    )
+                    break
                 self._safe_reopen()
                 if not self.is_opened():
-                    break
+                    continue
             else:
                 time.sleep(self._reconnect_interval_sec)
 
+    @override
     def read_frame(self) -> tuple[bool, Optional[np.ndarray]]:
         """Read one frame from capture."""
         if not self.is_opened():
@@ -132,6 +160,7 @@ class VideoSource(BaseVideoSource):
             return False, None
         return True, frame
 
+    @override
     def is_opened(self) -> bool:
         """Return True if capture handle is opened."""
         return hasattr(self, "cap") and self.cap is not None and self.cap.isOpened()
@@ -139,6 +168,7 @@ class VideoSource(BaseVideoSource):
     def reopen(self) -> None:
         """Recreate capture from original source."""
         self.release()
+        time.sleep(0.05)  # Brief delay to let OpenCV release the handle fully
         self.cap = cv2.VideoCapture(self._resolved_source)
         if not self.cap.isOpened():
             logger.error("Failed to reopen video source: %r", self.source)
@@ -162,18 +192,28 @@ class VideoSource(BaseVideoSource):
             return 0
         return int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
+    @override
     def release(self) -> None:
         """Release capture resources. Safe to call multiple times."""
         if hasattr(self, "cap") and self.cap is not None:
             self.cap.release()
             self.cap = None
 
+    def __del__(self) -> None:
+        """Ensure camera resources are released on garbage collection."""
+        self.release()
+
     def _safe_reopen(self) -> None:
         """Best-effort reopen used inside frame iteration."""
         try:
             self.reopen()
         except RuntimeError as e:
-            logger.warning("Reconnection failed: %s. Retrying in %.1fs", e, self._reconnect_interval_sec)
+            logger.warning(
+                "Reconnection failed for source %r: %s. Retrying in %.1fs",
+                self.source,
+                e,
+                self._reconnect_interval_sec,
+            )
             time.sleep(self._reconnect_interval_sec)
 
     @classmethod
@@ -199,4 +239,6 @@ class VideoSource(BaseVideoSource):
         """Return True for live stream/webcam sources."""
         if isinstance(source, int):
             return True
+        if not isinstance(source, str):
+            return False
         return source.lower().startswith(cls._STREAM_PREFIXES)
