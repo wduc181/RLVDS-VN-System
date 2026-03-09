@@ -1,10 +1,12 @@
 import sys
 import os
+from pathlib import Path
 import cv2
 import numpy as np
 
-# Adjust module path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Ensure project root is in sys.path when running this file directly.
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from rlvds.ingestion.video_source import VideoSource
 from rlvds.ingestion.frame_buffer import FrameBuffer
