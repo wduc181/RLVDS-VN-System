@@ -34,7 +34,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -179,6 +179,40 @@ class Violation:
 # =========================================================================
 # Abstract Base Classes
 # =========================================================================
+
+class BaseVideoSource(ABC):
+    """Interface cho các nguồn video/camera."""
+
+    @abstractmethod
+    def read_frame(self) -> Tuple[bool, Optional[np.ndarray]]:
+        """Đọc một frame từ nguồn.
+
+        Returns:
+            (thành_công_hay_không, frame_data)
+        """
+
+    @abstractmethod
+    def is_opened(self) -> bool:
+        """Kiểm tra nguồn còn mở hay không."""
+
+    @abstractmethod
+    def release(self) -> None:
+        """Giải phóng tài nguyên."""
+
+    def __iter__(self) -> Iterator[np.ndarray]:
+        """Default iterator đọc frame liên tục cho đến khi kết thúc."""
+        while self.is_opened():
+            ok, frame = self.read_frame()
+            if not ok or frame is None:
+                break
+            yield frame
+
+    def __enter__(self) -> "BaseVideoSource":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.release()
+
 
 class BaseDetector(ABC):
     """Interface cho module phát hiện đối tượng (YOLOv5, …)."""

@@ -36,10 +36,15 @@ from typing import Iterator, Optional, Union
 import cv2
 import numpy as np
 
+from rlvds.core.base import BaseVideoSource
+from rlvds.utils.logger import get_logger
+
 Source = Union[str, int]
 
+logger = get_logger(__name__)
 
-class VideoSource:
+
+class VideoSource(BaseVideoSource):
     """Wrapper around ``cv2.VideoCapture`` with robust frame iteration."""
 
     _STREAM_PREFIXES = (
@@ -71,7 +76,9 @@ class VideoSource:
         self.cap: cv2.VideoCapture = cv2.VideoCapture(self._resolved_source)
         if not self.cap.isOpened():
             self.release()
+            logger.error("Failed to open video source: %r", source)
             raise RuntimeError(f"Cannot open video source: {source!r}")
+        logger.info("Opened video source: %r (Stream: %s)", source, self._is_stream)
 
     def __enter__(self) -> "VideoSource":
         return self
@@ -134,7 +141,9 @@ class VideoSource:
         self.release()
         self.cap = cv2.VideoCapture(self._resolved_source)
         if not self.cap.isOpened():
+            logger.error("Failed to reopen video source: %r", self.source)
             raise RuntimeError(f"Cannot reopen video source: {self.source!r}")
+        logger.info("Successfully reopened video source: %r", self.source)
 
     def get_fps(self) -> float:
         if not self.is_opened():
@@ -163,7 +172,8 @@ class VideoSource:
         """Best-effort reopen used inside frame iteration."""
         try:
             self.reopen()
-        except RuntimeError:
+        except RuntimeError as e:
+            logger.warning("Reconnection failed: %s. Retrying in %.1fs", e, self._reconnect_interval_sec)
             time.sleep(self._reconnect_interval_sec)
 
     @classmethod
