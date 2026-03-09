@@ -1,4 +1,31 @@
-"""Video source wrapper for file/webcam/IP camera using OpenCV."""
+"""
+Video Source — OpenCV Video Capture Wrapper
+============================================
+
+Mục đích:
+    Wrapper thống nhất cho ``cv2.VideoCapture``, hỗ trợ đọc frame từ:
+    * Video file trên ổ đĩa
+    * Webcam (device index)
+    * Network / IP camera (RTSP/HTTP/RTMP/UDP)
+
+Tính năng:
+    - Tự động nhận diện loại source (file vs. stream)
+    - Context-manager support (``with VideoSource(...) as src: ...``)
+    - Frame iteration với tolerance cho read failures và auto-reconnect
+    - Helper methods: FPS, frame size, frame count
+
+Thư viện sử dụng:
+    - opencv-python (cv2): Video capture & processing
+    - numpy: Array operations (frame data)
+
+Sử dụng::
+
+    from rlvds.ingestion.video_source import VideoSource
+
+    with VideoSource("video.mp4") as src:
+        for frame in src:
+            ...  # process frame
+"""
 
 from __future__ import annotations
 
@@ -72,12 +99,19 @@ class VideoSource:
             if not self._is_stream:
                 break
 
-            # Stream input: try reconnect for transient glitches.
-            if failures > self._max_read_failures:
-                break
+            # Stream input: force reopen after hitting max consecutive failures,
+            # even if isOpened() still returns True (common with RTSP/HTTP glitches).
+            if failures >= self._max_read_failures:
+                self._safe_reopen()
+                if not self.is_opened():
+                    break
+                failures = 0
+                continue
 
             if not self.is_opened():
                 self._safe_reopen()
+                if not self.is_opened():
+                    break
             else:
                 time.sleep(self._reconnect_interval_sec)
 
@@ -121,9 +155,9 @@ class VideoSource:
 
     def release(self) -> None:
         """Release capture resources. Safe to call multiple times."""
-        if hasattr(self, "cap") and self.cap is not None and self.cap.isOpened():
+        if hasattr(self, "cap") and self.cap is not None:
             self.cap.release()
-        cv2.destroyAllWindows()
+            self.cap = None
 
     def _safe_reopen(self) -> None:
         """Best-effort reopen used inside frame iteration."""
