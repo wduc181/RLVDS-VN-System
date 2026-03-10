@@ -46,6 +46,7 @@ def _cleanup_video_source() -> None:
     st.session_state.pop("prev_time", None)
     st.session_state.pop("total_frames", None)
     st.session_state.pop("resolution", None)
+    st.session_state.pop("source_fps", None)
 
 
 def main() -> None:
@@ -116,9 +117,10 @@ def main() -> None:
 
         w, h = src.get_frame_size()
         total_frames = src.get_frame_count()
+        source_fps = src.get_fps()
         logger.info(
-            "Streaming %s — %d frames, %dx%d",
-            source_path, total_frames, w, h,
+            "Streaming %s — %d frames, %dx%d, %.2f fps",
+            source_path, total_frames, w, h, source_fps,
         )
 
         # Persist vào session_state
@@ -127,6 +129,7 @@ def main() -> None:
         st.session_state["prev_time"] = time.perf_counter()
         st.session_state["total_frames"] = total_frames
         st.session_state["resolution"] = f"{w}×{h}"
+        st.session_state["source_fps"] = source_fps if source_fps > 0 else 30.0
         st.session_state["running"] = True
         st.rerun()
 
@@ -182,6 +185,15 @@ def main() -> None:
     video_placeholder.image(display_frame, channels="RGB")
     fps_display.metric("FPS", fps)
     frame_count_display.metric("Frame", f"{frame_idx}/{total_frames}")
+
+    # Throttle rerun để tránh busy-loop: ngủ phần thời gian còn lại trong frame interval
+    source_fps: float = st.session_state.get("source_fps", 30.0)
+    if source_fps > 0:
+        frame_interval = 1.0 / source_fps
+        elapsed = time.perf_counter() - now
+        sleep_time = frame_interval - elapsed
+        if sleep_time > 0:
+            time.sleep(sleep_time)
 
     # Trigger next rerun để đọc frame tiếp theo
     st.rerun()
