@@ -9,90 +9,158 @@ Mục đích:
 Tham chiếu sample code:
     - .github/sample/camera.py (dòng 53-88) — toàn bộ violation flow
 
-    camera.py flow:
-      1. Kiểm tra elapsed_time % cycle < detection_duration (đèn đỏ?)
-      2. Nếu đèn đỏ:
-         - Tạo mask polygon → apply lên frame
-         - Detect plates trong masked frame
-         - Crop plate → preprocess → OCR
-         - Nếu đọc được biển số → GHI NHẬN VI PHẠM (lưu CSV + ảnh)
-      3. Nếu không phải đèn đỏ:
-         - Gọi clean_and_update_db.py để lọc + upload data
+Violation Condition:
+    (Light State == RED) AND (Detection anchor in Violation Zone) = VIOLATION
 
 Thư viện sử dụng:
     - datetime: Timestamp
-    - Các module nội bộ: spatial, temporal, ocr, persistence
-
-===========================================================================
-Violation Condition (điều kiện vi phạm):
-===========================================================================
-
-    (Light State == RED) AND (Plate detected in Violation Zone) = VIOLATION
-
-    Bất kỳ biển số nào được detect TRONG vùng polygon KHI đèn đỏ
-    → Đều được ghi nhận là vi phạm
-
-    Lưu ý: camera.py KHÔNG kiểm tra xe có đang di chuyển hay không
-    → Đơn giản: nếu biển số xuất hiện trong zone khi đèn đỏ = vi phạm
-
-===========================================================================
-Classes cần implement:
-===========================================================================
-
-1. ViolationDetector
-   - __init__(zone: ViolationZone, traffic_light: TrafficLightFSM)
-     + Lưu references đến zone và traffic_light
-     + Khởi tạo set() lưu biển số đã ghi nhận (tránh duplicate)
-
-   - check_frame(frame: np.ndarray, detections: list[Detection]) -> list[dict]
-     + Kiểm tra trạng thái đèn: traffic_light.is_red()
-     + Nếu KHÔNG đèn đỏ: return []
-     + Nếu ĐÈN ĐỎ:
-       - Với mỗi detection, kiểm tra center/anchor có trong zone
-       - Nếu trong zone → tạo violation_info dict
-     + Return list violation_info
-
-   - process_violation(detection: Detection, frame: np.ndarray,
-                       plate_text: str) -> Violation
-     + Tạo Violation dataclass (từ core/base.py)
-     + Lưu: plate_text, timestamp, image_path, confidence, bbox, zone_id
-
-   - is_duplicate(plate_text: str) -> bool
-     + Kiểm tra biển số đã ghi nhận chưa (trong session hiện tại)
-     + Dùng set() hoặc dict() để track
-
-   - get_light_state() -> LightState
-     + Trả về trạng thái đèn hiện tại
-
-   Violation info dict (tương tự camera.py dòng 81-88):
-     {
-         "plate_text": str,        # Biển số xe
-         "timestamp": str,         # datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-         "image_name": str,        # plate_text + str(current_time)
-         "frame": np.ndarray,      # Frame chứa vi phạm (để lưu ảnh)
-         "bbox": tuple,            # Bounding box biển số
-         "confidence": float       # OCR confidence
-     }
-
-Flow hoàn chỉnh trong pipeline (tương ứng camera.py):
-    1. traffic_light.is_red() → True
-    2. zone.apply_mask(frame) → masked_frame
-    3. detector.detect(masked_frame) → detections
-    4. zone.draw(frame) → frame with polygon overlay
-    5. Với mỗi detection:
-       a. detector.crop_plate(detection, frame) → crop_img
-       b. preprocess_image(crop_img) → processed
-       c. ocr.recognize(processed) → plate_text
-       d. Nếu plate_text != "unknown":
-          - violation_detector.process_violation(...)
-          - repository.save(violation)
-          - Lưu ảnh frame: cv2.imwrite(image_path, frame)
-
-TODO:
-    [ ] Import ViolationZone, TrafficLightFSM, Detection, Violation, datetime
-    [ ] Implement class ViolationDetector
-    [ ] Implement check_frame() — kiểm tra đèn đỏ + detection in zone
-    [ ] Implement process_violation() — tạo Violation dataclass
-    [ ] Implement is_duplicate() — tránh ghi nhận trùng
-    [ ] Test: mock đèn đỏ + mock detection in zone → verify violation detected
+    - Các module nội bộ: spatial (BaseSpatialReasoner), temporal (TrafficLightFSM)
 """
+
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Set
+
+import numpy as np
+
+from rlvds.core.base import BaseSpatialReasoner, Detection, Violation
+from rlvds.temporal.traffic_light import LightState, TrafficLightFSM
+from rlvds.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class ViolationDetector:
+    """Kết hợp Spatial zone + Temporal FSM để phát hiện vi phạm vượt đèn đỏ.
+
+    Args:
+        zone: Module suy luận không gian (implement ``BaseSpatialReasoner``).
+        traffic_light: FSM quản lý chu kỳ đèn giao thông.
+        violations_dir: Thư mục lưu ảnh bằng chứng vi phạm.
+        zone_id: ID định danh vùng giám sát.
+    """
+
+    def __init__(
+        self,
+        zone: BaseSpatialReasoner,
+        traffic_light: TrafficLightFSM,
+        violations_dir: str = "data/violations",
+        zone_id: str = "default",
+    ) -> None:
+        self._zone = zone
+        self._traffic_light = traffic_light
+        self._violations_dir = Path(violations_dir)
+        self._zone_id = zone_id
+        self._recorded_plates: Set[str] = set()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def check_frame(
+        self,
+        detections: List[Detection],
+    ) -> List[Detection]:
+        """Kiểm tra các detection trong frame, đánh dấu vi phạm.
+
+        Logic (theo camera.py):
+            1. Nếu đèn KHÔNG đỏ → return rỗng
+            2. Nếu đèn đỏ → kiểm tra anchor point của mỗi detection
+               có nằm trong zone hay không
+
+        Args:
+            detections: Danh sách detection từ detector.
+
+        Returns:
+            Danh sách detection được xác nhận vi phạm (``is_violation=True``).
+        """
+        if not self._traffic_light.is_red():
+            return []
+
+        violators: List[Detection] = []
+        for det in detections:
+            anchor = det.get_anchor_point()
+            if self._zone.is_in_zone(anchor):
+                det.is_violation = True
+                violators.append(det)
+
+        if violators:
+            logger.info(
+                "Detected %d violation(s) during RED light", len(violators),
+            )
+
+        return violators
+
+    def process_violation(
+        self,
+        detection: Detection,
+        frame: np.ndarray,
+        plate_text: str,
+    ) -> Optional[Violation]:
+        """Tạo bản ghi vi phạm và lưu ảnh bằng chứng.
+
+        Args:
+            detection: Detection object đã xác nhận vi phạm.
+            frame: Frame ảnh gốc tại thời điểm vi phạm.
+            plate_text: Biển số xe đã OCR.
+
+        Returns:
+            ``Violation`` dataclass nếu ghi nhận thành công,
+            ``None`` nếu biển số trùng lặp (đã ghi nhận trước đó).
+        """
+        if self.is_duplicate(plate_text):
+            logger.debug("Duplicate plate skipped: %s", plate_text)
+            return None
+
+        now = datetime.now()
+        image_name = f"{plate_text}_{now.strftime('%Y%m%d_%H%M%S')}.jpg"
+        image_path = self._violations_dir / image_name
+
+        # Lưu ảnh bằng chứng
+        self._violations_dir.mkdir(parents=True, exist_ok=True)
+        import cv2
+
+        cv2.imwrite(str(image_path), frame)
+
+        self._recorded_plates.add(plate_text)
+
+        violation = Violation(
+            plate_text=plate_text,
+            timestamp=now,
+            image_path=str(image_path),
+            confidence=detection.confidence,
+            bbox=detection.bbox,
+            zone_id=self._zone_id,
+            metadata={
+                "light_state": self._traffic_light.get_light_state(),
+                "anchor_point": detection.get_anchor_point(),
+            },
+        )
+
+        logger.info(
+            "Violation recorded — plate=%s zone=%s",
+            plate_text, self._zone_id,
+        )
+        return violation
+
+    def is_duplicate(self, plate_text: str) -> bool:
+        """Kiểm tra biển số đã được ghi nhận trong session hiện tại chưa.
+
+        Args:
+            plate_text: Chuỗi biển số cần kiểm tra.
+
+        Returns:
+            ``True`` nếu đã ghi nhận trước đó.
+        """
+        return plate_text in self._recorded_plates
+
+    def get_light_state(self) -> LightState:
+        """Trả về trạng thái đèn hiện tại."""
+        return self._traffic_light.get_state()
+
+    def clear_recorded_plates(self) -> None:
+        """Xóa danh sách biển số đã ghi nhận (cho cycle mới)."""
+        self._recorded_plates.clear()
+        logger.debug("Recorded plates cleared")
