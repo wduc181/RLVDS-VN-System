@@ -78,6 +78,11 @@ def main() -> None:
 
         show_fps = st.checkbox("Hiển thị FPS", value=True)
 
+        target_fps = st.slider(
+            "Target FPS", 1, 60, 30,
+            help="Giới hạn tốc độ hiển thị (frame/giây)",
+        )
+
         can_start = source_path is not None and not st.session_state.get(
             "running", False
         )
@@ -182,6 +187,13 @@ def main() -> None:
     video_placeholder.image(display_frame, channels="RGB")
     fps_display.metric("FPS", fps)
     frame_count_display.metric("Frame", f"{frame_idx}/{total_frames}")
+
+    # Throttle theo target FPS để tránh busy-loop
+    frame_interval = 1.0 / target_fps
+    elapsed = time.perf_counter() - now
+    sleep_time = frame_interval - elapsed
+    if sleep_time > 0:
+        time.sleep(sleep_time)
 
     # Trigger next rerun để đọc frame tiếp theo
     st.rerun()
