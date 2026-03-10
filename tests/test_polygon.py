@@ -66,9 +66,13 @@ class TestCreatePolygon:
         with pytest.raises(ValueError, match="ít nhất 3 đỉnh"):
             create_polygon([[0, 0], [10, 0]])
 
-    def test_empty_raises(self) -> None:
-        with pytest.raises(ValueError):
-            create_polygon([])
+    def test_empty_returns_dummy(self) -> None:
+        """Config mặc định truyền [] → trả về dummy polygon thay vì crash."""
+        poly = create_polygon([])
+        assert poly.shape == (3, 1, 2)
+        # Dummy polygon tại gốc → point_in_polygon luôn False cho điểm xa
+        from rlvds.spatial.polygon import point_in_polygon
+        assert point_in_polygon((50.0, 50.0), poly) is False
 
 
 # =========================================================================

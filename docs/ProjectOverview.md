@@ -154,11 +154,11 @@ Video → [Polygon Mask] → [YOLO Detect] → [Crop & Preprocess] → [OCR] →
 ### Phase 2: Phát triển Core Modules (Tuần 3-5)
 | Task | Mô tả | Status |
 |------|-------|--------|
-| Ingestion Module | Video capture, frame iterator | 🔄 In Progress |
-| Detection Module | Tích hợp YOLOv5, license plate detection | 🔄 In Progress |
+| Ingestion Module | Video capture, frame iterator | ✅ Done |
+| Detection Module | Tích hợp YOLOv5, license plate detection | ✅ Done |
 | OCR Module | PaddleOCR + YOLOv5 char detect | 🔄 In Progress |
-| Spatial Module | Polygon masking, point-in-polygon | 🔄 In Progress |
-| Temporal Module | Traffic light FSM, violation logic | 🔄 In Progress |
+| Spatial Module | Polygon masking, point-in-polygon | ✅ Done |
+| Temporal Module | Traffic light FSM, violation logic | ✅ Done |
 | Image Preprocessing | Upscale, denoise, contrast (CLAHE) | 🔄 In Progress |
 
 ### Phase 3: Tích hợp & UI (Tuần 6-7)

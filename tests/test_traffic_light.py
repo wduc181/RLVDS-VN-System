@@ -50,12 +50,12 @@ def zone() -> ViolationZone:
 
 
 @pytest.fixture
-def detector(zone: ViolationZone, fsm: TrafficLightFSM) -> ViolationDetector:
+def detector(zone: ViolationZone, fsm: TrafficLightFSM, tmp_path) -> ViolationDetector:
     """ViolationDetector với zone + FSM mặc định."""
     return ViolationDetector(
         zone=zone,
         traffic_light=fsm,
-        violations_dir="/tmp/rlvds_test_violations",
+        violations_dir=str(tmp_path / "rlvds_test_violations"),
         zone_id="test",
     )
 
@@ -280,6 +280,23 @@ class TestViolationDetector:
     def test_empty_detections(self, detector: ViolationDetector) -> None:
         result = detector.check_frame([])
         assert result == []
+
+    def test_is_violation_reset_between_frames(
+        self, detector: ViolationDetector, fsm: TrafficLightFSM,
+    ) -> None:
+        """Đảm bảo is_violation được reset giữa các frame.
+
+        Frame 1 (RED): xe trong zone → is_violation = True
+        Frame 2 (GREEN): cùng xe đó → is_violation phải = False
+        """
+        det = _make_detection(20, 20, 60, 60)
+        # Frame 1: RED → vi phạm
+        detector.check_frame([det])
+        assert det.is_violation is True
+        # Frame 2: GREEN → không vi phạm, is_violation phải reset
+        fsm.set_state(LightState.GREEN)
+        detector.check_frame([det])
+        assert det.is_violation is False
 
 
 # =========================================================================

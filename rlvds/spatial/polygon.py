@@ -22,6 +22,10 @@ from typing import List, Tuple
 import cv2
 import numpy as np
 
+from rlvds.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
 
 def create_polygon(vertices: List[List[int]]) -> np.ndarray:
     """Chuyển danh sách tọa độ thành numpy array cho OpenCV.
@@ -41,6 +45,14 @@ def create_polygon(vertices: List[List[int]]) -> np.ndarray:
         ValueError: Nếu polygon có ít hơn 3 đỉnh.
     """
     if len(vertices) < 3:
+        if len(vertices) == 0:
+            logger.warning(
+                "Polygon rỗng (0 đỉnh) — trả về dummy polygon. "
+                "Cập nhật config spatial.violation_zone trước khi sử dụng."
+            )
+            # Dummy polygon tại gốc — is_in_zone luôn False
+            dummy = np.array([[0, 0], [0, 0], [0, 0]], dtype=np.int32)
+            return dummy.reshape((-1, 1, 2))
         raise ValueError(
             f"Polygon cần ít nhất 3 đỉnh, nhận {len(vertices)}"
         )

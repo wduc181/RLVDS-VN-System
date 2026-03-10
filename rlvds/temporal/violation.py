@@ -73,6 +73,11 @@ class ViolationDetector:
         Returns:
             Danh sách detection được xác nhận vi phạm (``is_violation=True``).
         """
+        # Reset trạng thái vi phạm của tất cả detection trước khi kiểm tra
+        # Tránh "nhớ nhầm" từ frame trước → đánh dấu oan xe bình thường
+        for det in detections:
+            det.is_violation = False
+
         if not self._traffic_light.is_red():
             return []
 
@@ -119,7 +124,11 @@ class ViolationDetector:
         self._violations_dir.mkdir(parents=True, exist_ok=True)
         import cv2
 
-        cv2.imwrite(str(image_path), frame)
+        success = cv2.imwrite(str(image_path), frame)
+        if not success:
+            logger.warning(
+                "Failed to save evidence image: %s", image_path,
+            )
 
         self._recorded_plates.add(plate_text)
 
