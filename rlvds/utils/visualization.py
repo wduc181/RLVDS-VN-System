@@ -75,7 +75,7 @@ def set_hd_resolution(image: np.ndarray, width: int = 1280) -> np.ndarray:
 def draw_bbox(
     frame: np.ndarray,
     bbox: Tuple[int, int, int, int],
-    color: Tuple[int, int, int] = COLOR_RED,
+    color: Tuple[int, int, int] = COLOR_BLUE,
     thickness: int = 1,
     label: Optional[str] = None,
 ) -> np.ndarray:
