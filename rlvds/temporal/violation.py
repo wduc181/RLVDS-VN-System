@@ -6,9 +6,6 @@ Mục đích:
     Kết hợp Spatial (zone) + Temporal (light) để xác định vi phạm.
     Đây là logic trung tâm — quyết định xe nào vượt đèn đỏ.
 
-Tham chiếu sample code:
-    - .github/sample/camera.py (dòng 53-88) — toàn bộ violation flow
-
 Violation Condition:
     (Light State == RED) AND (Detection anchor in Violation Zone) = VIOLATION
 

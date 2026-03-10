@@ -6,9 +6,6 @@ Mục đích:
     Quản lý trạng thái đèn giao thông (giả lập).
     Xác định thời điểm nào đang là đèn đỏ để phối hợp với detection.
 
-Tham chiếu sample code:
-    - .github/sample/camera.py (dòng 33-36, 53) — cycle timer logic
-
 Thư viện sử dụng:
     - time: System timer
     - enum: State definitions
@@ -76,7 +73,6 @@ class TrafficLightFSM(BaseTemporalLogic):
         self._initial_state = LightState(initial_state)
         self._start_time: Optional[float] = None
 
-        # Duration lookup for convenience
         self._durations = {
             LightState.RED: red_sec,
             LightState.GREEN: green_sec,
