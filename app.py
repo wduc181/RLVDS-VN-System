@@ -43,7 +43,6 @@ def _cleanup_video_source() -> None:
             st.session_state.get("frame_idx", 0),
         )
     st.session_state.pop("frame_idx", None)
-    st.session_state.pop("prev_time", None)
     st.session_state.pop("total_frames", None)
     st.session_state.pop("resolution", None)
 
@@ -83,34 +82,31 @@ def main() -> None:
             help="Giới hạn tốc độ hiển thị (frame/giây)",
         )
 
-        can_start = source_path is not None and not st.session_state.get(
-            "running", False
+        is_running = st.session_state.get("running", False)
+        can_start = source_path is not None and not is_running
+
+        st.button(
+            "▶ Start",
+            use_container_width=True,
+            disabled=not can_start,
+            on_click=lambda: st.session_state.update(should_start=True),
         )
-        start = st.button(
-            "▶ Start", use_container_width=True, disabled=not can_start,
-        )
-        stop = st.button(
+        st.button(
             "⏹ Stop",
             use_container_width=True,
-            disabled=not st.session_state.get("running", False),
+            disabled=not is_running,
+            on_click=lambda: st.session_state.update(running=False),
         )
 
-    # ── Main area ────────────────────────────────────────────────────
+    # ── Main area placeholders ───────────────────────────────────────
     video_placeholder = st.empty()
     metrics_col1, metrics_col2, metrics_col3 = st.columns(3)
     fps_display = metrics_col1.empty()
     frame_count_display = metrics_col2.empty()
     resolution_display = metrics_col3.empty()
 
-    # ── Handle Stop ──────────────────────────────────────────────────
-    if stop:
-        _cleanup_video_source()
-        st.session_state["running"] = False
-        st.rerun()
-
     # ── Handle Start ─────────────────────────────────────────────────
-    if start and source_path:
-        # Dọn dẹp source cũ nếu có
+    if st.session_state.pop("should_start", False) and source_path:
         _cleanup_video_source()
 
         try:
@@ -126,77 +122,75 @@ def main() -> None:
             source_path, total_frames, w, h,
         )
 
-        # Persist vào session_state
         st.session_state["video_src"] = src
         st.session_state["frame_idx"] = 0
-        st.session_state["prev_time"] = time.perf_counter()
         st.session_state["total_frames"] = total_frames
         st.session_state["resolution"] = f"{w}×{h}"
         st.session_state["running"] = True
-        st.rerun()
 
-    # ── Idle state ───────────────────────────────────────────────────
+    # ── Handle Stop / cleanup ────────────────────────────────────────
     if not st.session_state.get("running", False):
-        st.info("Nhấn **▶ Start** để bắt đầu stream video.")
+        if "video_src" in st.session_state:
+            _cleanup_video_source()
+        video_placeholder.info("Nhấn **▶ Start** để bắt đầu stream video.")
         return
 
-    # ── Render 1 frame per rerun ─────────────────────────────────────
-    src: VideoSource = st.session_state.get("video_src")  # type: ignore[assignment]
+    # ── Video streaming (while loop — no st.rerun) ───────────────────
+    src = st.session_state.get("video_src")
     if src is None or not src.is_opened():
         _cleanup_video_source()
         st.session_state["running"] = False
-        st.warning("Video source không khả dụng.")
+        video_placeholder.warning("Video source không khả dụng.")
         return
 
+    total_frames = st.session_state.get("total_frames", 0)
     resolution_display.metric(
         "Resolution", st.session_state.get("resolution", "–"),
     )
-    total_frames: int = st.session_state.get("total_frames", 0)  # type: ignore[no-redef]
 
-    ok, frame = src.read_frame()
-
-    if not ok or frame is None:
-        # Hết video
-        _cleanup_video_source()
-        st.session_state["running"] = False
-        frame_idx = st.session_state.get("frame_idx", 0)
-        st.success(f"Hoàn tất — đã xử lý {frame_idx} frames.")
-        return
-
-    # FPS tính toán
-    now = time.perf_counter()
-    prev_time = st.session_state.get("prev_time", now)
-    dt = now - prev_time
-    fps = int(1 / dt) if dt > 0 else 0
-    st.session_state["prev_time"] = now
-
-    frame_idx = st.session_state.get("frame_idx", 0) + 1
-    st.session_state["frame_idx"] = frame_idx
-
-    # Vẽ FPS lên frame nếu được bật
-    if show_fps:
-        draw_fps(frame, fps)
-
-    # Resize cho hiển thị
-    display_frame = set_hd_resolution(frame, width=display_width)
-
-    # BGR → RGB cho Streamlit
-    display_frame = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
-
-    # Cập nhật UI
-    video_placeholder.image(display_frame, channels="RGB")
-    fps_display.metric("FPS", fps)
-    frame_count_display.metric("Frame", f"{frame_idx}/{total_frames}")
-
-    # Throttle theo target FPS để tránh busy-loop
     frame_interval = 1.0 / target_fps
-    elapsed = time.perf_counter() - now
-    sleep_time = frame_interval - elapsed
-    if sleep_time > 0:
-        time.sleep(sleep_time)
+    prev_time = time.perf_counter()
 
-    # Trigger next rerun để đọc frame tiếp theo
-    st.rerun()
+    while st.session_state.get("running", False):
+        ok, frame = src.read_frame()
+        if not ok or frame is None:
+            frame_idx = st.session_state.get("frame_idx", 0)
+            _cleanup_video_source()
+            st.session_state["running"] = False
+            video_placeholder.success(
+                f"Hoàn tất — đã xử lý {frame_idx} frames.",
+            )
+            break
+
+        # FPS tính toán
+        now = time.perf_counter()
+        dt = now - prev_time
+        fps = int(1 / dt) if dt > 0 else 0
+        prev_time = now
+
+        frame_idx = st.session_state.get("frame_idx", 0) + 1
+        st.session_state["frame_idx"] = frame_idx
+
+        # Vẽ FPS lên frame nếu được bật
+        if show_fps:
+            draw_fps(frame, fps)
+
+        # Resize cho hiển thị
+        display_frame = set_hd_resolution(frame, width=display_width)
+
+        # BGR → RGB cho Streamlit
+        display_frame = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
+
+        # Cập nhật UI (in-place, không rerun toàn trang)
+        video_placeholder.image(display_frame, channels="RGB")
+        fps_display.metric("FPS", fps)
+        frame_count_display.metric("Frame", f"{frame_idx}/{total_frames}")
+
+        # Throttle theo target FPS
+        elapsed = time.perf_counter() - now
+        sleep_time = frame_interval - elapsed
+        if sleep_time > 0:
+            time.sleep(sleep_time)
 
 
 if __name__ == "__main__":
