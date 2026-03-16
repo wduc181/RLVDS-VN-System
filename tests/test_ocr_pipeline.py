@@ -4,7 +4,12 @@ import numpy as np
 
 from rlvds.core.base import Detection
 from rlvds.core.mini_pipeline import MiniPipeline
-from rlvds.ocr.postprocess import check_valid_plate, format_plate, preprocess_image
+from rlvds.ocr.postprocess import (
+    check_valid_plate,
+    clean_plate_text,
+    format_plate,
+    preprocess_image,
+)
 from rlvds.ocr.recognizer import LicensePlateOCR
 from rlvds.spatial.zones import ViolationZone
 from rlvds.temporal.traffic_light import LightState, TrafficLightFSM
@@ -40,6 +45,19 @@ def test_format_and_validate_plate() -> None:
     text = format_plate("30a12345")
     assert text == "30A-12345"
     assert check_valid_plate(text) is True
+
+
+def test_format_and_validate_legacy_4_digit_plate() -> None:
+    text = format_plate("30A1234")
+    assert text == "30A-1234"
+    assert check_valid_plate(text) is True
+
+
+def test_clean_plate_text_series_a1_and_numeric_tail() -> None:
+    # OCR commonly confuses B in numeric tail with digit 8.
+    text = clean_plate_text("30A112B45")
+    assert text == "30A112845"
+    assert format_plate(text) == "30A1-12845"
 
 
 def test_license_plate_ocr_with_fake_engine() -> None:

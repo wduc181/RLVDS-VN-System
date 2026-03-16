@@ -59,13 +59,28 @@ def clean_plate_text(raw_text: str) -> str:
     chars[0] = _to_digit(chars[0])
     chars[1] = _to_digit(chars[1])
 
-    for i in range(2, len(chars)):
-        if chars[i].isalpha():
-            continue
+    hyphen_idx = text.find("-")
+    if hyphen_idx >= 0:
+        prefix_end = hyphen_idx
+    else:
+        # Heuristic without separator:
+        # - 2-digit province + 1 alpha series => prefix len 3
+        # - 2-digit province + alpha+digit series (e.g. A1) => prefix len 4
+        if len(chars) >= 9 and chars[3].isdigit():
+            prefix_end = 4
+        else:
+            prefix_end = 3
+
+    for i in range(2, min(prefix_end, len(chars))):
         if i == 2:
             chars[i] = _to_alpha(chars[i])
         else:
             chars[i] = _to_digit(chars[i])
+
+    for i in range(prefix_end, len(chars)):
+        if chars[i] == "-":
+            continue
+        chars[i] = _to_digit(chars[i])
 
     return "".join(chars)
 
@@ -81,7 +96,7 @@ def format_plate(text: str) -> str:
         cleaned = cleaned.replace("-", "")
 
     candidates: list[str] = []
-    if len(cleaned) >= 8:
+    if len(cleaned) >= 7:
         candidates.append(f"{cleaned[:3]}-{cleaned[3:]}")
     if len(cleaned) >= 9:
         candidates.append(f"{cleaned[:4]}-{cleaned[4:]}")
@@ -109,21 +124,25 @@ def check_valid_plate(plate: str) -> bool:
     province_code = parts[0][:2]
     if not province_code.isdigit():
         return False
+    province_int = int(province_code)
+    if province_int < 11 or province_int > 99:
+        return False
     if province_code in _INVALID_PROVINCE_CODES:
         return False
 
     if len(parts) == 2:
         prefix = parts[0]
-        if len(prefix) < 3 or not prefix[2].isalpha():
+        if not re.fullmatch(r"\d{2}[A-Z]\d?", prefix):
             return False
     elif len(parts) == 3:
-        if len(parts[0]) != 2:
+        if len(parts[0]) != 2 or not re.fullmatch(r"[A-Z]\d?", parts[1]):
             return False
     else:
         return False
 
     tail = parts[-1]
-    if len(tail) < 4 or len(tail) > 6:
+    # Support both legacy 4-digit tail and current 5-digit tail.
+    if len(tail) < 4 or len(tail) > 5:
         return False
     if not tail.isdigit():
         return False
