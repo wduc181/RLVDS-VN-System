@@ -73,8 +73,12 @@ def clean_plate_text(raw_text: str) -> str:
 def format_plate(text: str) -> str:
     """Format normalized text to VN-style plate representation."""
     cleaned = clean_plate_text(text)
+    # If text already contains a hyphen, only accept it as-is if it is a valid plate.
     if "-" in cleaned:
-        return cleaned
+        if check_valid_plate(cleaned):
+            return cleaned
+        # Strip hyphens from invalidly formatted text and continue with standard formatting.
+        cleaned = cleaned.replace("-", "")
 
     candidates: list[str] = []
     if len(cleaned) >= 8:
