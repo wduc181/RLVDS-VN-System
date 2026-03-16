@@ -17,9 +17,16 @@ import cv2
 import streamlit as st
 
 from config.settings import get_settings
-from rlvds.ingestion.video_source import VideoSource
+from rlvds.ingestion import FrameBuffer, VideoSource
+from rlvds.spatial import ViolationZone
+from rlvds.temporal import TrafficLightFSM, ViolationDetector
 from rlvds.utils.logger import get_logger
-from rlvds.utils.visualization import draw_fps, set_hd_resolution
+from rlvds.utils.visualization import (
+    draw_fps,
+    draw_light_status,
+    draw_zone_overlay,
+    set_hd_resolution,
+)
 
 logger = get_logger(__name__)
 
@@ -45,6 +52,37 @@ def _cleanup_video_source() -> None:
     st.session_state.pop("frame_idx", None)
     st.session_state.pop("total_frames", None)
     st.session_state.pop("resolution", None)
+    st.session_state.pop("traffic_light", None)
+    st.session_state.pop("zone", None)
+    st.session_state.pop("violation_detector", None)
+    st.session_state.pop("frame_buffer", None)
+    st.session_state.pop("violation_count", None)
+
+
+def _build_runtime_components() -> tuple[ViolationZone, TrafficLightFSM, ViolationDetector, FrameBuffer]:
+    """Khởi tạo spatial/temporal components cho phiên stream hiện tại."""
+    settings = get_settings()
+    zone = ViolationZone(
+        vertices=settings.spatial.violation_zone,
+        zone_id="default",
+        color=settings.spatial.zone_color,
+        thickness=settings.spatial.zone_thickness,
+    )
+    traffic_light = TrafficLightFSM(
+        red_sec=settings.temporal.red_duration_sec,
+        green_sec=settings.temporal.green_duration_sec,
+        yellow_sec=settings.temporal.yellow_duration_sec,
+        initial_state=settings.temporal.initial_state,
+    )
+    traffic_light.start()
+    violation_detector = ViolationDetector(
+        zone=zone,
+        traffic_light=traffic_light,
+        violations_dir=settings.paths.violations_dir,
+        zone_id=zone.zone_id,
+    )
+    frame_buffer = FrameBuffer(max_size=settings.video.buffer_size)
+    return zone, traffic_light, violation_detector, frame_buffer
 
 
 def main() -> None:
@@ -76,10 +114,27 @@ def main() -> None:
         )
 
         show_fps = st.checkbox("Hiển thị FPS", value=True)
+        show_zone_overlay = st.checkbox("Hiển thị zone overlay", value=True)
 
         target_fps = st.slider(
             "Target FPS", 1, 60, 30,
             help="Giới hạn tốc độ hiển thị (frame/giây)",
+        )
+
+        st.divider()
+        st.subheader("Spatial Zone")
+        if settings.spatial.violation_zone:
+            st.caption("Vertices (x, y):")
+            st.code(str(settings.spatial.violation_zone), language="python")
+        else:
+            st.info("`spatial.violation_zone` đang rỗng. App sẽ dùng dummy polygon.")
+
+        st.subheader("Traffic Light Cycle")
+        st.caption(
+            "R/G/Y = "
+            f"{settings.temporal.red_duration_sec}/"
+            f"{settings.temporal.green_duration_sec}/"
+            f"{settings.temporal.yellow_duration_sec} (s)"
         )
 
         is_running = st.session_state.get("running", False)
@@ -100,10 +155,13 @@ def main() -> None:
 
     # ── Main area placeholders ───────────────────────────────────────
     video_placeholder = st.empty()
-    metrics_col1, metrics_col2, metrics_col3 = st.columns(3)
+    metrics_col1, metrics_col2, metrics_col3, metrics_col4, metrics_col5 = st.columns(5)
     fps_display = metrics_col1.empty()
     frame_count_display = metrics_col2.empty()
     resolution_display = metrics_col3.empty()
+    light_state_display = metrics_col4.empty()
+    timer_display = metrics_col5.empty()
+    violation_count_display = st.empty()
 
     # ── Handle Start ─────────────────────────────────────────────────
     if st.session_state.pop("should_start", False) and source_path:
@@ -126,6 +184,12 @@ def main() -> None:
         st.session_state["frame_idx"] = 0
         st.session_state["total_frames"] = total_frames
         st.session_state["resolution"] = f"{w}×{h}"
+        zone, traffic_light, violation_detector, frame_buffer = _build_runtime_components()
+        st.session_state["zone"] = zone
+        st.session_state["traffic_light"] = traffic_light
+        st.session_state["violation_detector"] = violation_detector
+        st.session_state["frame_buffer"] = frame_buffer
+        st.session_state["violation_count"] = 0
         st.session_state["running"] = True
 
     # ── Handle Stop / cleanup ────────────────────────────────────────
@@ -137,10 +201,17 @@ def main() -> None:
 
     # ── Video streaming (while loop — no st.rerun) ───────────────────
     src = st.session_state.get("video_src")
+    zone = st.session_state.get("zone")
+    traffic_light = st.session_state.get("traffic_light")
     if src is None or not src.is_opened():
         _cleanup_video_source()
         st.session_state["running"] = False
         video_placeholder.warning("Video source không khả dụng.")
+        return
+    if zone is None or traffic_light is None:
+        _cleanup_video_source()
+        st.session_state["running"] = False
+        video_placeholder.warning("Spatial/Temporal components chưa được khởi tạo.")
         return
 
     total_frames = st.session_state.get("total_frames", 0)
@@ -171,6 +242,22 @@ def main() -> None:
         frame_idx = st.session_state.get("frame_idx", 0) + 1
         st.session_state["frame_idx"] = frame_idx
 
+        light_state = traffic_light.get_state().value
+        time_remaining = traffic_light.get_time_remaining()
+
+        if show_zone_overlay:
+            draw_zone_overlay(
+                frame,
+                zone.polygon,
+                color=settings.spatial.zone_color,
+                alpha=0.25,
+                thickness=settings.spatial.zone_thickness,
+            )
+        else:
+            zone.draw(frame)
+
+        draw_light_status(frame, light_state)
+
         # Vẽ FPS lên frame nếu được bật
         if show_fps:
             draw_fps(frame, fps)
@@ -185,6 +272,12 @@ def main() -> None:
         video_placeholder.image(display_frame, channels="RGB")
         fps_display.metric("FPS", fps)
         frame_count_display.metric("Frame", f"{frame_idx}/{total_frames}")
+        light_state_display.metric("Light State", light_state)
+        timer_display.metric("Time Remaining (s)", f"{time_remaining:.1f}")
+        violation_count_display.metric(
+            "Violation Count (preview)",
+            st.session_state.get("violation_count", 0),
+        )
 
         # Throttle theo target FPS
         elapsed = time.perf_counter() - now

@@ -142,6 +142,32 @@ def draw_light_status(
     return frame
 
 
+def draw_zone_overlay(
+    frame: np.ndarray,
+    polygon: np.ndarray,
+    color: Tuple[int, int, int] = COLOR_RED,
+    alpha: float = 0.25,
+    thickness: int = 2,
+) -> np.ndarray:
+    """Vẽ zone overlay bán trong suốt kèm viền polygon.
+
+    Args:
+        frame: Frame ảnh gốc (sẽ bị thay đổi in-place).
+        polygon: Polygon dạng OpenCV ``(N, 1, 2)`` dtype int32.
+        color: Màu zone theo BGR.
+        alpha: Độ trong suốt lớp fill (0.0 đến 1.0).
+        thickness: Độ dày viền polygon.
+
+    Returns:
+        Frame đã được vẽ zone overlay.
+    """
+    overlay = frame.copy()
+    cv2.fillPoly(overlay, [polygon], color)
+    cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+    cv2.polylines(frame, [polygon], isClosed=True, color=color, thickness=thickness)
+    return frame
+
+
 def draw_violation_alert(
     frame: np.ndarray,
     text: str = "VIOLATION",

@@ -35,9 +35,9 @@ tracking:
 
 # --- Spatial (Vùng vi phạm) ---
 spatial:
-  violation_zone: []         # Polygon vertices: [[x1,y1], [x2,y2], ...]
+  violation_zone: [[600, 450], [1200, 450], [1260, 700], [600, 700]]   # Polygon vertices: [[x1,y1], [x2,y2], ...]
   zone_color: [0, 0, 255]   # BGR color cho hiển thị polygon
-  zone_thickness: 2          # Độ dày nét vẽ polygon
+  zone_thickness: 1          # Độ dày nét vẽ polygon
 
 # --- Temporal (Đèn giao thông) ---
 temporal:
