@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, List, Sequence
+from typing import Any, List, Optional, Sequence
 
 import numpy as np
 
 from rlvds.core.base import BaseOCR
-from rlvds.ocr.postprocess import clean_plate_text, format_plate, preprocess_image
+from config.settings import get_settings
+from rlvds.ocr.postprocess import clean_plate_text, format_plate
+from rlvds.ocr.preprocessor import PlatePreprocessor
 from rlvds.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -29,14 +31,20 @@ class LicensePlateOCR(BaseOCR):
         use_gpu: bool = False,
         confidence_threshold: float = 0.8,
         ocr_engine: Any | None = None,
+        preprocessor: Optional[PlatePreprocessor] = None,
     ) -> None:
         self._lang = lang
         self._use_gpu = use_gpu
         self._confidence_threshold = confidence_threshold
         self._ocr = ocr_engine if ocr_engine is not None else self._build_engine()
+        self._preprocessor = (
+            preprocessor
+            if preprocessor is not None
+            else PlatePreprocessor(get_settings().preprocessing)
+        )
 
     def preprocess(self, image: np.ndarray) -> np.ndarray:
-        return preprocess_image(image)
+        return self._preprocessor.run_pipeline(image)
 
     def recognize(self, image: np.ndarray) -> str:
         if image is None or image.size == 0:
@@ -108,7 +116,11 @@ class LicensePlateOCR(BaseOCR):
 class YOLOv5CharOCR(BaseOCR):
     """Fallback OCR engine based on character detection."""
 
-    def __init__(self, model_path: str, model: Any | None = None) -> None:
+    def __init__(
+        self,
+        model_path: str,
+        model: Any | None = None,
+    ) -> None:
         self._model_path = model_path
         self._model = model if model is not None else self._load_model(model_path)
 
@@ -137,9 +149,6 @@ class YOLOv5CharOCR(BaseOCR):
         plate_text = self._assemble_text(chars)
         plate_text = format_plate(plate_text)
         return plate_text if plate_text else "unknown"
-
-    def preprocess(self, image: np.ndarray) -> np.ndarray:
-        return preprocess_image(image)
 
     def _load_model(self, model_path: str) -> Any | None:
         try:

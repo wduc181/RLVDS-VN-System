@@ -54,6 +54,18 @@ ocr:
   rec_model_dir: ""          # Để trống = tự download model mặc định
   confidence_threshold: 0.6  # Ngưỡng confidence cho OCR result
 
+# --- Image Preprocessing (crop + upscale + denoise + CLAHE) ---
+preprocessing:
+  upscale_factor: 2.0           # Hệ số phóng to ảnh biển số (cv2.INTER_CUBIC)
+  denoise_h: 30.0                # Cường độ lọc noise; cao hơn = mịn hơn, mất chi tiết hơn
+  denoise_template_window: 7    # Template window size (px, lẻ)
+  denoise_search_window: 21     # Search window size (px, lẻ)
+  clahe_clip_limit: 2.0         # Clip limit CLAHE; cao hơn = tương phản mạnh hơn
+  clahe_tile_grid_size: [8, 8]  # Tile grid size (W, H) cho CLAHE
+  expand_ratio: 0.15            # Mở rộng bbox 15% mỗi phía khi crop biển số
+  min_plate_width: 20           # Bỏ qua crop nhỏ hơn ngưỡng này (px)
+  min_plate_height: 10          # Bỏ qua crop nhỏ hơn ngưỡng này (px)
+
 # --- Database ---
 database:
   url: "sqlite:///data/rlvds.db"
