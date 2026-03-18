@@ -51,35 +51,33 @@ def clean_plate_text(raw_text: str) -> str:
         return ""
 
     text = re.sub(r"[^A-Za-z0-9.-]", "", raw_text).upper().replace(".", "")
-    text = text.replace(" ", "")
+    # Strip all hyphens early - they are unreliable from OCR and can be in wrong positions
+    text = text.replace("-", "")
     if len(text) < 2:
         return text
 
     chars = list(text)
+    # First 2 chars are always province code digits
     chars[0] = _to_digit(chars[0])
     chars[1] = _to_digit(chars[1])
 
-    hyphen_idx = text.find("-")
-    if hyphen_idx >= 0:
-        prefix_end = hyphen_idx
+    # Heuristic to determine prefix end:
+    # - 2-digit province + 1 alpha series => prefix len 3
+    # - 2-digit province + alpha+digit series (e.g. A1) => prefix len 4
+    if len(chars) >= 9 and chars[3].isdigit():
+        prefix_end = 4
     else:
-        # Heuristic without separator:
-        # - 2-digit province + 1 alpha series => prefix len 3
-        # - 2-digit province + alpha+digit series (e.g. A1) => prefix len 4
-        if len(chars) >= 9 and chars[3].isdigit():
-            prefix_end = 4
-        else:
-            prefix_end = 3
+        prefix_end = 3
 
+    # Fix chars in prefix (after province code)
     for i in range(2, min(prefix_end, len(chars))):
         if i == 2:
             chars[i] = _to_alpha(chars[i])
         else:
             chars[i] = _to_digit(chars[i])
 
+    # Fix chars in tail (all should be digits)
     for i in range(prefix_end, len(chars)):
-        if chars[i] == "-":
-            continue
         chars[i] = _to_digit(chars[i])
 
     return "".join(chars)
