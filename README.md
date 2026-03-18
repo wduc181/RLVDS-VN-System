@@ -111,14 +111,15 @@ git clone <repo-url>
 cd RLVDS-VN-System
 
 # 2. Tạo conda environment
-conda create -n rlvds python=3.10 -y
-conda activate rlvds
+conda create -n lpr_env python=3.10 -y
+conda activate lpr_env
 
 # 3. Cài đặt dependencies
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
 
-# 4. Download model weights
-# (Đang cập nhật)
+# 4. Chạy Streamlit
+streamlit run app.py
 ```
 
 ## Cách sử dụng (Đang cập nhật)

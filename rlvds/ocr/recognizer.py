@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, List, Sequence
+from typing import Any, List, Optional, Sequence
 
 import numpy as np
 
 from rlvds.core.base import BaseOCR
-from rlvds.ocr.postprocess import clean_plate_text, format_plate, preprocess_image
+from config.settings import get_settings
+from rlvds.ocr.postprocess import clean_plate_text, format_plate
+from rlvds.ocr.preprocessor import PlatePreprocessor
 from rlvds.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -29,14 +31,20 @@ class LicensePlateOCR(BaseOCR):
         use_gpu: bool = False,
         confidence_threshold: float = 0.8,
         ocr_engine: Any | None = None,
+        preprocessor: Optional[PlatePreprocessor] = None,
     ) -> None:
         self._lang = lang
         self._use_gpu = use_gpu
         self._confidence_threshold = confidence_threshold
         self._ocr = ocr_engine if ocr_engine is not None else self._build_engine()
+        self._preprocessor = (
+            preprocessor
+            if preprocessor is not None
+            else PlatePreprocessor(get_settings().preprocessing)
+        )
 
     def preprocess(self, image: np.ndarray) -> np.ndarray:
-        return preprocess_image(image)
+        return self._preprocessor.run_pipeline(image)
 
     def recognize(self, image: np.ndarray) -> str:
         if image is None or image.size == 0:
@@ -61,16 +69,26 @@ class LicensePlateOCR(BaseOCR):
             logger.warning("Cannot import PaddleOCR: %s", exc)
             return None
 
+        # HARDCODE use_gpu=False để tránh xung đột cuDNN
+        # PyTorch (CUDA 12.4) kéo cuDNN 9.x, PaddlePaddle 2.6.2 chỉ tương thích cuDNN 8.x
+        # OCR xử lý ảnh biển số nhỏ (~150x50px) nên CPU đủ nhanh, không cần GPU
         try:
+            logger.info("Initializing PaddleOCR with lang='%s', use_gpu=False (CPU-only)...", self._lang)
             return PaddleOCR(
                 lang=self._lang,
-                use_gpu=self._use_gpu,
+                use_gpu=False,  # LUÔN dùng CPU để tránh xung đột cuDNN
                 show_log=False,
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Cannot initialize PaddleOCR: %s", exc)
-            return None
+        except Exception as e1:
+            logger.warning("Failed to initialize with lang: %s - %s", type(e1).__name__, e1)
 
+            # Try initializing fallback with CPU
+            try:
+                logger.info("Trying to initialize PaddleOCR default (CPU-only)...")
+                return PaddleOCR(use_gpu=False, show_log=False)
+            except Exception as e2:
+                logger.error("Failed to initialize PaddleOCR: %s - %s", type(e2).__name__, e2)
+                return None
     def _parse_paddle_result(self, result: Any) -> OCRResult | None:
         if not result:
             return None
@@ -108,7 +126,11 @@ class LicensePlateOCR(BaseOCR):
 class YOLOv5CharOCR(BaseOCR):
     """Fallback OCR engine based on character detection."""
 
-    def __init__(self, model_path: str, model: Any | None = None) -> None:
+    def __init__(
+        self,
+        model_path: str,
+        model: Any | None = None,
+    ) -> None:
         self._model_path = model_path
         self._model = model if model is not None else self._load_model(model_path)
 
@@ -137,9 +159,6 @@ class YOLOv5CharOCR(BaseOCR):
         plate_text = self._assemble_text(chars)
         plate_text = format_plate(plate_text)
         return plate_text if plate_text else "unknown"
-
-    def preprocess(self, image: np.ndarray) -> np.ndarray:
-        return preprocess_image(image)
 
     def _load_model(self, model_path: str) -> Any | None:
         try:
