@@ -69,16 +69,26 @@ class LicensePlateOCR(BaseOCR):
             logger.warning("Cannot import PaddleOCR: %s", exc)
             return None
 
+        # HARDCODE use_gpu=False để tránh xung đột cuDNN
+        # PyTorch (CUDA 12.4) kéo cuDNN 9.x, PaddlePaddle 2.6.2 chỉ tương thích cuDNN 8.x
+        # OCR xử lý ảnh biển số nhỏ (~150x50px) nên CPU đủ nhanh, không cần GPU
         try:
+            logger.info("Initializing PaddleOCR with lang='%s', use_gpu=False (CPU-only)...", self._lang)
             return PaddleOCR(
                 lang=self._lang,
-                use_gpu=self._use_gpu,
+                use_gpu=False,  # LUÔN dùng CPU để tránh xung đột cuDNN
                 show_log=False,
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Cannot initialize PaddleOCR: %s", exc)
-            return None
+        except Exception as e1:
+            logger.warning("Failed to initialize with lang: %s - %s", type(e1).__name__, e1)
 
+            # Try initializing fallback with CPU
+            try:
+                logger.info("Trying to initialize PaddleOCR default (CPU-only)...")
+                return PaddleOCR(use_gpu=False, show_log=False)
+            except Exception as e2:
+                logger.error("Failed to initialize PaddleOCR: %s - %s", type(e2).__name__, e2)
+                return None
     def _parse_paddle_result(self, result: Any) -> OCRResult | None:
         if not result:
             return None

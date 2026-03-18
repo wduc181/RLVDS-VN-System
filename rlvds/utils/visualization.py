@@ -203,3 +203,68 @@ def draw_violation_alert(
         font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA,
     )
     return frame
+
+
+def draw_detections(
+    frame: np.ndarray,
+    results: list,
+    bbox_color: Tuple[int, int, int] = COLOR_BLUE,
+    violation_color: Tuple[int, int, int] = COLOR_RED,
+    text_color: Tuple[int, int, int] = COLOR_GREEN,
+    bbox_thickness: int = 2,
+    font_scale: float = 0.7,
+    font_thickness: int = 2,
+) -> np.ndarray:
+    """Vẽ detection results lên frame (bbox + plate text + violation alert).
+
+    Args:
+        frame: Frame ảnh gốc (sẽ bị thay đổi in-place).
+        results: Danh sách MiniPipelineResult (duck-typed để tránh circular import).
+            Mỗi result cần có: detection (với bbox, confidence), plate_text, is_violation.
+        bbox_color: Màu bbox mặc định (BGR).
+        violation_color: Màu bbox khi phát hiện vi phạm (BGR).
+        text_color: Màu text biển số (BGR).
+        bbox_thickness: Độ dày viền bbox.
+        font_scale: Hệ số co giãn font cho plate text.
+        font_thickness: Độ dày nét chữ plate text.
+
+    Returns:
+        Frame đã vẽ annotations.
+    """
+    has_violation = False
+
+    for result in results:
+        detection = result.detection
+        plate_text = result.plate_text
+        is_violation = result.is_violation
+
+        x1, y1, x2, y2 = detection.bbox
+        confidence = detection.confidence
+
+        # Choose color based on violation status
+        color = violation_color if is_violation else bbox_color
+
+        # Draw bounding box with confidence label
+        label = f"{int(confidence * 100)}%"
+        draw_bbox(frame, (x1, y1, x2, y2), color=color, thickness=bbox_thickness, label=label)
+
+        # Draw plate text above bbox if recognized
+        if plate_text and plate_text.lower() != "unknown":
+            text_y = max(y1 - 35, 20)
+            draw_text(
+                frame,
+                plate_text,
+                pos=(x1, text_y),
+                font_scale=font_scale,
+                font_thickness=font_thickness,
+                text_color=text_color,
+            )
+
+        if is_violation:
+            has_violation = True
+
+    # Draw violation alert banner once if any violation detected
+    if has_violation:
+        draw_violation_alert(frame, text="VIOLATION DETECTED")
+
+    return frame

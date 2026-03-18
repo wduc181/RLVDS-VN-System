@@ -11,10 +11,14 @@ Cách chạy:
 """
 
 import time
+import warnings
 from pathlib import Path
 
 import cv2
 import streamlit as st
+
+# Suppress torch deprecation warnings from YOLOv5
+warnings.filterwarnings("ignore", message=".*torch.cuda.amp.autocast.*")
 
 from config.settings import get_settings
 from rlvds.ingestion import FrameBuffer, VideoSource
@@ -22,11 +26,15 @@ from rlvds.spatial import ViolationZone
 from rlvds.temporal import TrafficLightFSM, ViolationDetector
 from rlvds.utils.logger import get_logger
 from rlvds.utils.visualization import (
+    draw_detections,
     draw_fps,
     draw_light_status,
     draw_zone_overlay,
     set_hd_resolution,
 )
+from rlvds.core.mini_pipeline import MiniPipeline
+from rlvds.detection import LicensePlateDetector
+from rlvds.ocr.recognizer import LicensePlateOCR
 
 logger = get_logger(__name__)
 
@@ -57,6 +65,8 @@ def _cleanup_video_source() -> None:
     st.session_state.pop("violation_detector", None)
     st.session_state.pop("frame_buffer", None)
     st.session_state.pop("violation_count", None)
+    st.session_state.pop("mini_pipeline", None)
+    st.session_state.pop("detection_available", None)
 
 
 def _build_runtime_components() -> tuple[ViolationZone, TrafficLightFSM, ViolationDetector, FrameBuffer]:
@@ -115,6 +125,20 @@ def main() -> None:
 
         show_fps = st.checkbox("Hiển thị FPS", value=True)
         show_zone_overlay = st.checkbox("Hiển thị zone overlay", value=True)
+        show_detection = st.checkbox(
+            "Nhận diện biển số",
+            value=False,
+            help="Bật detection + OCR overlay lên video",
+        )
+
+        # Warning only after pipeline init attempted (mini_pipeline key exists)
+        if (
+            show_detection
+            and st.session_state.get("running", False)
+            and "mini_pipeline" in st.session_state
+            and not st.session_state.get("detection_available", False)
+        ):
+            st.warning("Model detection chưa được load. Kiểm tra detection.model_path trong config.")
 
         target_fps = st.slider(
             "Target FPS", 1, 60, 30,
@@ -190,6 +214,38 @@ def main() -> None:
         st.session_state["violation_detector"] = violation_detector
         st.session_state["frame_buffer"] = frame_buffer
         st.session_state["violation_count"] = 0
+
+        # Initialize detection pipeline
+        try:
+            detector = LicensePlateDetector(
+                model_path=settings.detection.model_path,
+                confidence_threshold=settings.detection.confidence_threshold,
+                iou_threshold=settings.detection.iou_threshold,
+                image_size=settings.detection.image_size,
+                device=settings.detection.device,
+            )
+            ocr_engine = LicensePlateOCR(
+                lang=settings.ocr.lang,
+                use_gpu=settings.ocr.use_gpu,
+                confidence_threshold=settings.ocr.confidence_threshold,
+            )
+            pipeline = MiniPipeline(
+                detector=detector,
+                ocr=ocr_engine,
+                violation_detector=violation_detector,
+                crop_expand_ratio=settings.preprocessing.expand_ratio,
+            )
+            st.session_state["mini_pipeline"] = pipeline
+            st.session_state["detection_available"] = detector.is_available()
+            if detector.is_available():
+                logger.info("Detection pipeline initialized successfully")
+            else:
+                logger.warning("Detection model not available - detection disabled")
+        except Exception as exc:
+            logger.warning("Failed to initialize detection pipeline: %s", exc)
+            st.session_state["mini_pipeline"] = None
+            st.session_state["detection_available"] = False
+
         st.session_state["running"] = True
 
     # ── Handle Stop / cleanup ────────────────────────────────────────
@@ -256,6 +312,25 @@ def main() -> None:
         else:
             zone.draw(frame)
 
+        # Detection + OCR overlay
+        detection_results = []
+        if show_detection:
+            pipeline = st.session_state.get("mini_pipeline")
+            if pipeline and st.session_state.get("detection_available", False):
+                try:
+                    detection_results = pipeline.process_frame(frame)
+                    draw_detections(frame, detection_results)
+                except Exception as exc:
+                    logger.error("Detection failed on frame %d: %s", frame_idx, exc)
+
+        # Update violation count from detection results
+        # NOTE: This is a naive counter that may count the same vehicle multiple times
+        # across consecutive frames. Proper deduplication requires vehicle tracking.
+        new_violations = sum(1 for r in detection_results if r.is_violation)
+        if new_violations > 0:
+            current_count = st.session_state.get("violation_count", 0)
+            st.session_state["violation_count"] = current_count + new_violations
+
         draw_light_status(frame, light_state)
 
         # Vẽ FPS lên frame nếu được bật
@@ -269,7 +344,11 @@ def main() -> None:
         display_frame = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
 
         # Cập nhật UI (in-place, không rerun toàn trang)
-        video_placeholder.image(display_frame, channels="RGB")
+        # Wrap in try/except to handle transient Streamlit cache errors
+        try:
+            video_placeholder.image(display_frame, channels="RGB")
+        except Exception:
+            pass  # Transient MediaFileStorageError - safe to ignore
         fps_display.metric("FPS", fps)
         frame_count_display.metric("Frame", f"{frame_idx}/{total_frames}")
         light_state_display.metric("Light State", light_state)
