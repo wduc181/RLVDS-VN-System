@@ -156,24 +156,24 @@ Video → [Polygon Mask] → [YOLO Detect] → [Crop & Preprocess] → [OCR] →
 |------|-------|--------|
 | Ingestion Module | Video capture, frame iterator | ✅ Done |
 | Detection Module | Tích hợp YOLOv5, license plate detection | ✅ Done |
-| OCR Module | PaddleOCR + YOLOv5 char detect | 🔄 In Progress |
+| OCR Module | PaddleOCR + YOLOv5 char detect | ✅ Done  |
 | Spatial Module | Polygon masking, point-in-polygon | ✅ Done |
 | Temporal Module | Traffic light FSM, violation logic | ✅ Done |
-| Image Preprocessing | Upscale, denoise, contrast (CLAHE) | 🔄 In Progress |
+| Image Preprocessing | Upscale, denoise, contrast (CLAHE) | ✅ Done|
 
 ### Phase 3: Tích hợp & UI (Tuần 6-7)
 | Task | Mô tả | Status |
 |------|-------|--------|
-| Pipeline Integration | Kết nối các modules thành pipeline | ⬜ Not Started |
-| Persistence Layer | SQLite database, CRUD + data cleaning | ⬜ Not Started |
-| Streamlit UI | Giao diện web hiển thị kết quả | ⬜ Not Started |
+| Pipeline Integration | Kết nối các modules thành pipeline | ✅ Done |
+| Persistence Layer | SQLite database, CRUD + data cleaning | 🔄 In Progress |
+| Streamlit UI | Giao diện web hiển thị kết quả | 🔄 In Progress |
 | Tracking (Optional) | Multi-object tracking | ⬜ Not Started |
 
 ### Phase 4: Testing & Hoàn thiện (Tuần 8)
 | Task | Mô tả | Status |
 |------|-------|--------|
 | Unit Testing | Viết tests cho từng module | ⬜ Not Started |
-| Integration Testing | Test toàn bộ pipeline | ⬜ Not Started |
-| Performance Tuning | Tối ưu tốc độ xử lý | ⬜ Not Started |
-| Documentation | Hoàn thiện docs | ⬜ Not Started |
-| Demo | Chuẩn bị demo | ⬜ Not Started |
+| Integration Testing | Test toàn bộ pipeline | 🔄 In Progress|
+| Performance Tuning | Tối ưu tốc độ xử lý | 🔄 In Progress |
+| Documentation | Hoàn thiện docs | 🔄 In Progress |
+| Demo | Chuẩn bị demo | 🔄 In Progress|
