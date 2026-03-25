@@ -1,59 +1,66 @@
-"""
-Data Models
-============
+"""Data models for persistence layer."""
 
-Mục đích:
-    Định nghĩa data model cho bảng violations trong SQLite.
+from __future__ import annotations
 
-Tham chiếu:
-    - core/base.py::Violation dataclass — dùng cho business logic
-    - Module này — dùng cho database mapping
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from typing import Any
 
-Thư viện sử dụng:
-    - dataclasses hoặc sqlite3 Row
+from rlvds.core.base import Violation
 
-===========================================================================
-Model cần implement:
-===========================================================================
 
-1. ViolationRecord (dataclass hoặc namedtuple)
-   Fields mapping với SQLite table:
-     - id: int                  (PRIMARY KEY AUTOINCREMENT)
-     - plate_text: str          (biển số xe — ví dụ: "29B1-12345")
-     - timestamp: str           (thời điểm vi phạm — "23/02/2026 19:00:00")
-     - image_path: str          (đường dẫn ảnh: "data/violations/29B1-12345_xxx.jpg")
-     - confidence: float        (độ tin cậy OCR: 0.0 - 1.0)
-     - zone_id: str             (vùng vi phạm: "default")
-     - created_at: str          (thời điểm tạo record)
+@dataclass
+class ViolationRecord:
+    """Database row model for a violation."""
 
-   Mapping từ sample CSV (camera.py dòng 86-87):
-     CSV row: [lp, dt_string, name]
-     →  plate_text = lp
-     →  timestamp  = dt_string  (datetime.now().strftime("%d/%m/%Y %H:%M:%S"))
-     →  image_path = "violation_data/img/" + name + ".jpg"
+    plate_text: str
+    violation_time: str
+    light_state: str
+    status: str = "VIOLATION"
+    full_image_path: str = ""
+    plate_image_path: str = ""
+    confidence: float = 0.0
+    zone_id: str = "default"
+    id: int | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
 
-   Helper methods:
-     - from_row(row: sqlite3.Row) -> ViolationRecord
-       + Convert DB row sang dataclass
-     - to_dict() -> dict
-       + Convert sang dict để JSON serialize
-     - from_violation(v: Violation) -> ViolationRecord
-       + Convert Violation (core/base.py) sang DB record
+    @classmethod
+    def from_row(cls, row: Any) -> "ViolationRecord":
+        return cls(
+            id=row["id"],
+            plate_text=row["plate_text"],
+            violation_time=row["violation_time"],
+            light_state=row["light_state"],
+            status=row["status"],
+            full_image_path=row["full_image_path"] or "",
+            plate_image_path=row["plate_image_path"] or "",
+            confidence=float(row["confidence"] or 0.0),
+            zone_id=row["zone_id"] or "default",
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
 
-SQL Schema (phải match với database.py):
-    CREATE TABLE IF NOT EXISTS violations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        plate_text VARCHAR NOT NULL,
-        timestamp DATETIME NOT NULL,
-        image_path VARCHAR,
-        confidence FLOAT DEFAULT 0.0,
-        zone_id VARCHAR DEFAULT 'default',
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
-TODO:
-    [ ] Import dataclasses, sqlite3
-    [ ] Implement ViolationRecord dataclass
-    [ ] Implement from_row(), to_dict(), from_violation()
-    [ ] Đảm bảo fields match với CREATE TABLE schema
-"""
+    @classmethod
+    def from_violation(cls, v: Violation) -> "ViolationRecord":
+        light_state = str(v.metadata.get("light_state", "RED"))
+        plate_image_path = str(v.metadata.get("plate_image_path", ""))
+        return cls(
+            plate_text=v.plate_text,
+            violation_time=_to_iso(v.timestamp),
+            light_state=light_state,
+            status="VIOLATION",
+            full_image_path=v.image_path,
+            plate_image_path=plate_image_path,
+            confidence=v.confidence,
+            zone_id=v.zone_id,
+        )
+
+
+def _to_iso(value: datetime | str) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat(timespec="seconds")
+    return str(value)

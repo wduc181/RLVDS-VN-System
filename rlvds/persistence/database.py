@@ -1,82 +1,124 @@
-"""
-Database Connection & Operations
-=================================
+"""SQLite database manager for violation persistence."""
 
-Mục đích:
-    Quản lý kết nối SQLite database để lưu trữ dữ liệu vi phạm.
+from __future__ import annotations
 
-Tham chiếu sample code:
-    - .github/sample/camera.py (dòng 81-88) — ghi CSV
-    - .github/sample/clean_and_update_db.py — MongoDB (ta thay bằng SQLite)
+import sqlite3
+from pathlib import Path
+from typing import Any, Iterable
 
-    camera.py sử dụng CSV đơn giản:
-      with open(license_plate_file, mode='a', newline='') as file:
-          writer = csv.writer(file)
-          writer.writerow([lp, dt_string, name])
-          cv2.imwrite("violation_data/img/" + name + ".jpg", frame)
+from rlvds.utils.logger import get_logger
 
-    Ta nâng cấp lên SQLite cho structured queries + CRUD.
+logger = get_logger(__name__)
 
-Thư viện sử dụng:
-    - sqlite3: Built-in Python SQLite
 
-Config (từ config/settings.py):
-    database:
-      url: "sqlite:///data/rlvds.db"
+class Database:
+    """Thin wrapper around sqlite3 connection with schema bootstrap."""
 
-===========================================================================
-Class cần implement:
-===========================================================================
+    def __init__(self, db_path_or_url: str = "sqlite:///data/rlvds.db") -> None:
+        self.db_path = self._resolve_db_path(db_path_or_url)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn: sqlite3.Connection | None = None
 
-1. Database
-   - __init__(db_path: str = "data/rlvds.db")
-     + Lưu db_path
-     + Tạo thư mục parent nếu chưa có
+    @staticmethod
+    def _resolve_db_path(value: str) -> Path:
+        prefix = "sqlite:///"
+        if value.startswith(prefix):
+            value = value[len(prefix):]
+        return Path(value).expanduser().resolve()
 
-   - connect() -> None
-     + self.conn = sqlite3.connect(db_path)
-     + self.conn.row_factory = sqlite3.Row  # trả về dict-like rows
+    def connect(self) -> None:
+        if self.conn is not None:
+            return
+        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA foreign_keys = ON;")
+        self.conn.execute("PRAGMA journal_mode = WAL;")
+        self.conn.execute("PRAGMA synchronous = NORMAL;")
 
-   - disconnect() -> None
-     + self.conn.close()
+    def disconnect(self) -> None:
+        if self.conn is None:
+            return
+        self.conn.close()
+        self.conn = None
 
-   - create_tables() -> None
-     + Tạo bảng violations nếu chưa tồn tại:
-       CREATE TABLE IF NOT EXISTS violations (
-           id INTEGER PRIMARY KEY AUTOINCREMENT,
-           plate_text VARCHAR NOT NULL,
-           timestamp DATETIME NOT NULL,
-           image_path VARCHAR,
-           confidence FLOAT DEFAULT 0.0,
-           zone_id VARCHAR DEFAULT 'default',
-           created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-       );
-     + Tạo indexes:
-       CREATE INDEX IF NOT EXISTS idx_plate_text ON violations(plate_text);
-       CREATE INDEX IF NOT EXISTS idx_timestamp ON violations(timestamp);
+    def create_tables(self) -> None:
+        self._ensure_connected()
+        self.execute(
+            """
+            CREATE TABLE IF NOT EXISTS violations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                plate_text TEXT NOT NULL UNIQUE,
+                violation_time TEXT NOT NULL,
+                light_state TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'VIOLATION',
+                full_image_path TEXT,
+                plate_image_path TEXT,
+                confidence REAL NOT NULL DEFAULT 0.0,
+                zone_id TEXT NOT NULL DEFAULT 'default',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+        self.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_violations_updated_at
+            AFTER UPDATE ON violations
+            FOR EACH ROW
+            BEGIN
+                UPDATE violations
+                SET updated_at = CURRENT_TIMESTAMP
+                WHERE id = OLD.id;
+            END;
+            """
+        )
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_violations_time ON violations(violation_time);"
+        )
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_violations_light_state ON violations(light_state);"
+        )
+        logger.info("SQLite schema ready: %s", self.db_path)
 
-   - execute(query: str, params: tuple = ()) -> sqlite3.Cursor
-     + cursor = self.conn.cursor()
-     + cursor.execute(query, params)
-     + self.conn.commit()
-     + return cursor
+    def execute(self, query: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
+        self._ensure_connected()
+        assert self.conn is not None
+        cur = self.conn.cursor()
+        cur.execute(query, tuple(params))
+        self.conn.commit()
+        return cur
 
-   - __enter__ / __exit__
-     + Hỗ trợ context manager
+    def executemany(self, query: str, rows: Iterable[Iterable[Any]]) -> sqlite3.Cursor:
+        self._ensure_connected()
+        assert self.conn is not None
+        cur = self.conn.cursor()
+        cur.executemany(query, [tuple(r) for r in rows])
+        self.conn.commit()
+        return cur
 
-Ví dụ sử dụng:
-    db = Database("data/rlvds.db")
-    db.connect()
-    db.create_tables()
-    db.execute("INSERT INTO violations (plate_text, timestamp) VALUES (?, ?)",
-               ("29B1-12345", "2026-02-23 19:00:00"))
-    db.disconnect()
+    def query_one(self, query: str, params: Iterable[Any] = ()) -> sqlite3.Row | None:
+        cur = self._execute_read(query, params)
+        return cur.fetchone()
 
-TODO:
-    [ ] Import sqlite3, pathlib
-    [ ] Implement class Database
-    [ ] Implement connect(), disconnect(), create_tables()
-    [ ] Implement execute()
-    [ ] Implement __enter__/__exit__ context manager
-    [ ] Test: create in-memory DB → create tables → insert → select → verify
-"""
+    def query_all(self, query: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
+        cur = self._execute_read(query, params)
+        return cur.fetchall()
+
+    def _execute_read(self, query: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
+        self._ensure_connected()
+        assert self.conn is not None
+        cur = self.conn.cursor()
+        cur.execute(query, tuple(params))
+        return cur
+
+    def _ensure_connected(self) -> None:
+        if self.conn is None:
+            self.connect()
+
+    def __enter__(self) -> "Database":
+        self.connect()
+        self.create_tables()
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.disconnect()

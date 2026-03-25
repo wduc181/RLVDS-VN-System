@@ -1,11 +1,7 @@
-"""
-RLVDS Persistence Package
-=========================
+"""Persistence layer exports."""
 
-Lưu trữ dữ liệu vi phạm vào SQLite database.
+from rlvds.persistence.database import Database
+from rlvds.persistence.models import ViolationRecord
+from rlvds.persistence.repository import ViolationRepository
 
-Modules:
-    - database.py: SQLite connection & operations
-    - models.py: Data models (SQLAlchemy/dataclass)
-    - repository.py: Data access patterns
-"""
+__all__ = ["Database", "ViolationRecord", "ViolationRepository"]
