@@ -33,6 +33,8 @@ from rlvds.utils.visualization import (
     set_hd_resolution,
 )
 from rlvds.core.mini_pipeline import MiniPipeline
+from rlvds.core.cached_pipeline import CachedPipeline
+from rlvds.ocr.plate_cache import PlateTrackCache
 from rlvds.detection import LicensePlateDetector
 from rlvds.ocr.recognizer import LicensePlateOCR
 
@@ -66,6 +68,7 @@ def _cleanup_video_source() -> None:
     st.session_state.pop("frame_buffer", None)
     st.session_state.pop("violation_count", None)
     st.session_state.pop("mini_pipeline", None)
+    st.session_state.pop("cached_pipeline", None)
     st.session_state.pop("detection_available", None)
 
 
@@ -229,13 +232,36 @@ def main() -> None:
                 use_gpu=settings.ocr.use_gpu,
                 confidence_threshold=settings.ocr.confidence_threshold,
             )
-            pipeline = MiniPipeline(
-                detector=detector,
-                ocr=ocr_engine,
-                violation_detector=violation_detector,
-                crop_expand_ratio=settings.preprocessing.expand_ratio,
-            )
-            st.session_state["mini_pipeline"] = pipeline
+
+            # Chọn pipeline: CachedPipeline (tối ưu FPS) hoặc MiniPipeline (gốc)
+            if settings.ocr_cache.enabled:
+                plate_cache = PlateTrackCache(
+                    iou_threshold=settings.ocr_cache.iou_threshold,
+                    max_size=settings.ocr_cache.max_cache_size,
+                    ttl_frames=settings.ocr_cache.cache_ttl_frames,
+                )
+                pipeline = CachedPipeline(
+                    detector=detector,
+                    ocr=ocr_engine,
+                    violation_detector=violation_detector,
+                    cache=plate_cache,
+                    crop_expand_ratio=settings.preprocessing.expand_ratio,
+                    ocr_quality_frames=settings.ocr_cache.ocr_quality_frames,
+                )
+                st.session_state["cached_pipeline"] = pipeline
+                logger.info("CachedPipeline initialized (iou_thresh=%.2f, ttl=%d)",
+                            settings.ocr_cache.iou_threshold,
+                            settings.ocr_cache.cache_ttl_frames)
+            else:
+                pipeline = MiniPipeline(
+                    detector=detector,
+                    ocr=ocr_engine,
+                    violation_detector=violation_detector,
+                    crop_expand_ratio=settings.preprocessing.expand_ratio,
+                )
+                st.session_state["mini_pipeline"] = pipeline
+                logger.info("MiniPipeline initialized (cache disabled)")
+
             st.session_state["detection_available"] = detector.is_available()
             if detector.is_available():
                 logger.info("Detection pipeline initialized successfully")
@@ -244,6 +270,7 @@ def main() -> None:
         except Exception as exc:
             logger.warning("Failed to initialize detection pipeline: %s", exc)
             st.session_state["mini_pipeline"] = None
+            st.session_state["cached_pipeline"] = None
             st.session_state["detection_available"] = False
 
         st.session_state["running"] = True
@@ -315,7 +342,11 @@ def main() -> None:
         # Detection + OCR overlay
         detection_results = []
         if show_detection:
-            pipeline = st.session_state.get("mini_pipeline")
+            # Ưu tiên CachedPipeline, fallback sang MiniPipeline
+            pipeline = (
+                st.session_state.get("cached_pipeline")
+                or st.session_state.get("mini_pipeline")
+            )
             if pipeline and st.session_state.get("detection_available", False):
                 try:
                     detection_results = pipeline.process_frame(frame)

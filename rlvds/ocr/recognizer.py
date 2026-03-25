@@ -47,20 +47,34 @@ class LicensePlateOCR(BaseOCR):
         return self._preprocessor.run_pipeline(image)
 
     def recognize(self, image: np.ndarray) -> str:
+        result = self.recognize_with_confidence(image)
+        return result.text
+
+    def recognize_with_confidence(self, image: np.ndarray) -> OCRResult:
+        """Nhận diện text từ ảnh biển số, trả về cả confidence.
+
+        Args:
+            image: Ảnh biển số ``(H, W, C)`` dạng BGR.
+
+        Returns:
+            ``OCRResult(text, confidence)``.
+        """
         if image is None or image.size == 0:
-            return "unknown"
+            return OCRResult(text="unknown", confidence=0.0)
         if self._ocr is None:
             logger.warning("PaddleOCR engine unavailable; returning unknown")
-            return "unknown"
+            return OCRResult(text="unknown", confidence=0.0)
 
         processed = self.preprocess(image)
         result = self._ocr.ocr(processed)
         parsed = self._parse_paddle_result(result)
         if parsed is None:
-            return "unknown"
+            return OCRResult(text="unknown", confidence=0.0)
 
         text = format_plate(parsed.text)
-        return text if text else "unknown"
+        if not text:
+            return OCRResult(text="unknown", confidence=0.0)
+        return OCRResult(text=text, confidence=parsed.confidence)
 
     def _build_engine(self) -> Any | None:
         try:
@@ -135,30 +149,49 @@ class YOLOv5CharOCR(BaseOCR):
         self._model = model if model is not None else self._load_model(model_path)
 
     def recognize(self, image: np.ndarray) -> str:
+        result = self.recognize_with_confidence(image)
+        return result.text
+
+    def recognize_with_confidence(self, image: np.ndarray) -> OCRResult:
+        """Nhận diện text từ ảnh biển số, trả về cả confidence.
+
+        Args:
+            image: Ảnh biển số ``(H, W, C)`` dạng BGR.
+
+        Returns:
+            ``OCRResult(text, confidence)``.
+        """
         if image is None or image.size == 0:
-            return "unknown"
+            return OCRResult(text="unknown", confidence=0.0)
         if self._model is None:
-            return "unknown"
+            return OCRResult(text="unknown", confidence=0.0)
 
         try:
             results = self._model(image)
             rows = results.pandas().xyxy[0].values.tolist()
         except Exception as exc:  # noqa: BLE001
             logger.warning("YOLO char OCR inference failed: %s", exc)
-            return "unknown"
+            return OCRResult(text="unknown", confidence=0.0)
 
         if len(rows) < 7 or len(rows) > 10:
-            return "unknown"
+            return OCRResult(text="unknown", confidence=0.0)
 
         chars = []
+        confidences: List[float] = []
         for row in rows:
             x1, y1, x2, y2 = row[0], row[1], row[2], row[3]
+            conf = float(row[4])
             label = str(row[6])
             chars.append(((x1 + x2) / 2.0, (y1 + y2) / 2.0, label))
+            confidences.append(conf)
 
         plate_text = self._assemble_text(chars)
         plate_text = format_plate(plate_text)
-        return plate_text if plate_text else "unknown"
+        if not plate_text:
+            return OCRResult(text="unknown", confidence=0.0)
+
+        avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
+        return OCRResult(text=plate_text, confidence=avg_conf)
 
     def _load_model(self, model_path: str) -> Any | None:
         try:
