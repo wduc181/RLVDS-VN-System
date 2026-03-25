@@ -136,6 +136,29 @@ class OCRConfig(BaseModel):
     confidence_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
 
 
+class OCRCacheConfig(BaseModel):
+    """Cấu hình OCR caching để tối ưu FPS.
+
+    Khi enabled, chỉ gọi PaddleOCR cho detection mới (cache miss).
+    Các frame sau reuse kết quả OCR nếu bbox match theo IOU.
+
+    Attributes:
+        enabled: Bật/tắt OCR caching.
+        iou_threshold: Ngưỡng IOU tối thiểu để match bbox cũ-mới.
+            Mặc định 0.3 vì FPS thấp (≤5) gây displacement lớn giữa frames.
+        max_cache_size: Số plate tối đa trong cache.
+        cache_ttl_frames: Số frame tối đa giữ cache entry trước khi expire.
+        ocr_quality_frames: Số lần OCR tối đa cho cùng một plate
+            (lấy kết quả confidence cao nhất).
+    """
+
+    enabled: bool = True
+    iou_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
+    max_cache_size: int = Field(default=50, ge=1)
+    cache_ttl_frames: int = Field(default=150, ge=1)
+    ocr_quality_frames: int = Field(default=3, ge=1)
+
+
 class PreprocessingConfig(BaseModel):
     """Cấu hình tiền xử lý ảnh biển số trước OCR.
 
@@ -276,6 +299,7 @@ class Settings(BaseSettings):
     spatial: SpatialConfig = Field(default_factory=SpatialConfig)
     temporal: TemporalConfig = Field(default_factory=TemporalConfig)
     ocr: OCRConfig = Field(default_factory=OCRConfig)
+    ocr_cache: OCRCacheConfig = Field(default_factory=OCRCacheConfig)
     preprocessing: PreprocessingConfig = Field(default_factory=PreprocessingConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
