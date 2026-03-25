@@ -178,6 +178,15 @@ class CachedPipeline:
                         confidence=ocr_conf,
                         frame_idx=self._frame_idx,
                     )
+                else:
+                    # OCR trả "unknown" — vẫn phải tăng ocr_count
+                    # để tránh vòng lặp vô hạn (Infinite OCR Loop)
+                    self._cache.add_or_update(
+                        bbox=bbox,
+                        plate_text=cached.plate_text,
+                        confidence=cached.confidence,
+                        frame_idx=self._frame_idx,
+                    )
                 # Bug 4 fix: đã gọi OCR → from_cache=False
                 best_text = plate_text if plate_text != "unknown" else cached.plate_text
                 return best_text, False

@@ -379,6 +379,37 @@ class TestCachedPipeline:
             "Cache should store OCR confidence, not detection confidence"
         )
 
+    def test_unknown_ocr_stops_after_quality_frames(self) -> None:
+        """OCR returning 'unknown' still increments ocr_count (no infinite loop)."""
+        ocr = _CountingOCR(plate_text="unknown", confidence=0.0)
+        pipeline = _make_pipeline(ocr=ocr, ocr_quality_frames=3)
+        frame = np.ones((300, 300, 3), dtype=np.uint8) * 128
+
+        # Frame 1: cache miss → OCR → "unknown" → no cache entry added
+        pipeline.process_frame(frame)
+        assert ocr.call_count == 1
+
+        # Manually seed a cache entry (simulating a prior valid read)
+        # ocr_count starts at 1 (default from add_or_update)
+        pipeline.cache.add_or_update(
+            bbox=(100, 100, 200, 200),
+            plate_text="30A-12345",
+            confidence=0.8,
+            frame_idx=pipeline.frame_idx,
+        )
+
+        # Frames 2-3: cache hit + quality branch (ocr_count 1→2→3)
+        # OCR returns "unknown" but ocr_count still increments
+        for _ in range(2):
+            pipeline.process_frame(frame)
+        assert ocr.call_count == 3  # 1 (miss) + 2 (quality)
+
+        # Frame 4+: ocr_count >= 3 → skip OCR entirely
+        before = ocr.call_count
+        pipeline.process_frame(frame)
+        pipeline.process_frame(frame)
+        assert ocr.call_count == before, "OCR should NOT be called after quality frames exhausted"
+
     def test_reset_clears_state(self) -> None:
         """Pipeline reset clears cache and frame counter."""
         ocr = _CountingOCR()
