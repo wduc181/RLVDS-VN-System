@@ -73,12 +73,45 @@ class PlateTrackCache:
         self._hits: int = 0
         self._misses: int = 0
 
+    def _find_best_match(
+        self,
+        bbox: Tuple[int, int, int, int],
+        frame_idx: int,
+    ) -> Optional[CachedPlate]:
+        """Tìm entry có IOU >= threshold, bỏ qua entry đã hết TTL.
+
+        Hàm nội bộ chỉ làm nhiệm vụ tìm kiếm — **không** thay đổi
+        state (bbox, last_seen) hay stats (hits/misses).
+
+        Args:
+            bbox: Bounding box cần tìm match ``(x1, y1, x2, y2)``.
+            frame_idx: Index của frame hiện tại.
+
+        Returns:
+            ``CachedPlate`` nếu tìm thấy match, ``None`` nếu không.
+        """
+        best_entry: Optional[CachedPlate] = None
+        best_iou: float = 0.0
+
+        for entry in self._entries:
+            # Skip entry đã hết TTL — tránh "revival bug"
+            if (frame_idx - entry.last_seen_frame) > self._ttl_frames:
+                continue
+            iou = compute_iou(bbox, entry.bbox)
+            if iou >= self._iou_threshold and iou > best_iou:
+                best_iou = iou
+                best_entry = entry
+
+        return best_entry
+
     def match(
         self,
         bbox: Tuple[int, int, int, int],
         frame_idx: int,
     ) -> Optional[CachedPlate]:
         """Tìm entry có IOU >= threshold với bbox hiện tại.
+
+        Cập nhật bbox, last_seen_frame và stats nếu tìm thấy.
 
         Args:
             bbox: Bounding box cần tìm match ``(x1, y1, x2, y2)``.
@@ -87,14 +120,7 @@ class PlateTrackCache:
         Returns:
             ``CachedPlate`` nếu tìm thấy match, ``None`` nếu cache miss.
         """
-        best_entry: Optional[CachedPlate] = None
-        best_iou: float = 0.0
-
-        for entry in self._entries:
-            iou = compute_iou(bbox, entry.bbox)
-            if iou >= self._iou_threshold and iou > best_iou:
-                best_iou = iou
-                best_entry = entry
+        best_entry = self._find_best_match(bbox, frame_idx)
 
         if best_entry is not None:
             # Cập nhật bbox và last_seen
@@ -102,9 +128,8 @@ class PlateTrackCache:
             best_entry.last_seen_frame = frame_idx
             self._hits += 1
             logger.debug(
-                "Cache HIT: plate=%s iou=%.2f frame=%d",
+                "Cache HIT: plate=%s frame=%d",
                 best_entry.plate_text,
-                best_iou,
                 frame_idx,
             )
             return best_entry
@@ -133,9 +158,12 @@ class PlateTrackCache:
         Returns:
             ``CachedPlate`` đã thêm/cập nhật.
         """
-        # Tìm entry hiện có
-        existing = self.match(bbox, frame_idx)
+        # Tìm entry hiện có — dùng _find_best_match để tránh
+        # đếm nhầm stats (Bug 2: Stat Inflation)
+        existing = self._find_best_match(bbox, frame_idx)
         if existing is not None:
+            existing.bbox = bbox
+            existing.last_seen_frame = frame_idx
             existing.ocr_count += 1
             # Cập nhật text nếu confidence mới cao hơn
             if confidence > existing.confidence:

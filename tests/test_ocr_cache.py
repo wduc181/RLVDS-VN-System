@@ -8,6 +8,7 @@ import pytest
 from rlvds.core.base import Detection
 from rlvds.core.cached_pipeline import CachedPipeline, CachedPipelineResult
 from rlvds.ocr.plate_cache import CachedPlate, PlateTrackCache
+from rlvds.ocr.recognizer import OCRResult
 from rlvds.spatial.zones import ViolationZone
 from rlvds.temporal.traffic_light import TrafficLightFSM
 from rlvds.temporal.violation import ViolationDetector
@@ -149,9 +150,32 @@ class TestPlateTrackCache:
         cache.match((100, 100, 200, 200), frame_idx=2)  # hit
         cache.match((500, 500, 600, 600), frame_idx=3)  # miss
 
-        assert cache.hit_count >= 1
-        assert cache.miss_count >= 1
+        assert cache.hit_count == 1
+        assert cache.miss_count == 1
         assert 0 < cache.hit_rate < 1.0
+
+    def test_expired_entry_not_revived(self) -> None:
+        """Entry hết TTL không match dù IOU cao (Bug 1 fix)."""
+        cache = PlateTrackCache(iou_threshold=0.3, max_size=10, ttl_frames=5)
+        cache.add_or_update((100, 100, 200, 200), "30A-12345", 0.9, frame_idx=1)
+
+        # Frame 10: entry đã hết TTL (last_seen=1, ttl=5, 10-1=9 > 5)
+        result = cache.match((100, 100, 200, 200), frame_idx=10)
+        assert result is None, "Expired entry should NOT be revived"
+
+    def test_add_or_update_no_stat_inflation(self) -> None:
+        """add_or_update() không tăng hit/miss counters (Bug 2 fix)."""
+        cache = PlateTrackCache(iou_threshold=0.3, max_size=10, ttl_frames=100)
+
+        # add_or_update lần 1: thêm mới
+        cache.add_or_update((100, 100, 200, 200), "30A-12345", 0.7, frame_idx=1)
+        assert cache.hit_count == 0
+        assert cache.miss_count == 0
+
+        # add_or_update lần 2: cập nhật (same bbox)
+        cache.add_or_update((100, 100, 200, 200), "30A-12346", 0.95, frame_idx=2)
+        assert cache.hit_count == 0, "add_or_update should NOT inflate hit count"
+        assert cache.miss_count == 0, "add_or_update should NOT inflate miss count"
 
     def test_clear(self) -> None:
         """Cache.clear() removes all entries and resets stats."""
@@ -199,13 +223,18 @@ class _FakeDetector:
 class _CountingOCR:
     """OCR that counts how many times recognize() is called."""
 
-    def __init__(self, plate_text: str = "30A-12345"):
+    def __init__(self, plate_text: str = "30A-12345", confidence: float = 0.92):
         self._plate_text = plate_text
+        self._confidence = confidence
         self.call_count = 0
 
     def recognize(self, _image):
         self.call_count += 1
         return self._plate_text
+
+    def recognize_with_confidence(self, _image) -> OCRResult:
+        self.call_count += 1
+        return OCRResult(text=self._plate_text, confidence=self._confidence)
 
 
 def _make_pipeline(
@@ -312,6 +341,43 @@ class TestCachedPipeline:
         # Frame 4+ should reuse cache
         pipeline.process_frame(frame)
         assert ocr.call_count == 3
+
+    def test_quality_frames_from_cache_false(self) -> None:
+        """Quality-frames branch returns from_cache=False (Bug 4 fix)."""
+        ocr = _CountingOCR()
+        pipeline = _make_pipeline(ocr=ocr, ocr_quality_frames=3)
+        frame = np.ones((300, 300, 3), dtype=np.uint8) * 128
+
+        # Frame 1: cache miss → from_cache=False
+        results = pipeline.process_frame(frame)
+        assert results[0].from_cache is False
+
+        # Frame 2: cache hit nhưng ocr_count < 3 → chạy OCR → from_cache=False
+        results = pipeline.process_frame(frame)
+        assert results[0].from_cache is False, "Quality OCR branch should NOT be from_cache"
+
+        # Frame 3: vẫn chạy OCR quality
+        results = pipeline.process_frame(frame)
+        assert results[0].from_cache is False
+
+        # Frame 4: đủ quality → reuse → from_cache=True
+        results = pipeline.process_frame(frame)
+        assert results[0].from_cache is True
+
+    def test_ocr_confidence_used_not_detection(self) -> None:
+        """Cache stores OCR confidence, not YOLO detection confidence (Bug 3 fix)."""
+        ocr = _CountingOCR(plate_text="30A-99999", confidence=0.88)
+        pipeline = _make_pipeline(ocr=ocr, ocr_quality_frames=1)
+        frame = np.ones((300, 300, 3), dtype=np.uint8) * 128
+
+        pipeline.process_frame(frame)
+        # Detection confidence is 0.9 (from _FakeDetector),
+        # but cache should store OCR confidence 0.88
+        cached = pipeline.cache.match((100, 100, 200, 200), pipeline.frame_idx + 1)
+        assert cached is not None
+        assert cached.confidence == pytest.approx(0.88), (
+            "Cache should store OCR confidence, not detection confidence"
+        )
 
     def test_reset_clears_state(self) -> None:
         """Pipeline reset clears cache and frame counter."""

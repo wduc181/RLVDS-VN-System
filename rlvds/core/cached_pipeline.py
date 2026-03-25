@@ -22,6 +22,7 @@ import numpy as np
 
 from rlvds.core.base import Detection
 from rlvds.ocr.plate_cache import CachedPlate, PlateTrackCache
+from rlvds.ocr.recognizer import OCRResult
 from rlvds.temporal.violation import ViolationDetector
 from rlvds.utils.logger import get_logger
 
@@ -47,6 +48,9 @@ class OCRLike(Protocol):
     """Protocol cho OCR module."""
 
     def recognize(self, image: np.ndarray) -> str:
+        ...
+
+    def recognize_with_confidence(self, image: np.ndarray) -> OCRResult:
         ...
 
 
@@ -166,32 +170,34 @@ class CachedPipeline:
             # Cache HIT — kiểm tra xem đã đủ quality frames chưa
             if cached.ocr_count < self._ocr_quality_frames:
                 # Chạy thêm OCR để cải thiện confidence
-                plate_text = self._run_ocr(det, frame)
+                plate_text, ocr_conf = self._run_ocr(det, frame)
                 if plate_text != "unknown":
                     self._cache.add_or_update(
                         bbox=bbox,
                         plate_text=plate_text,
-                        confidence=det.confidence,
+                        confidence=ocr_conf,
                         frame_idx=self._frame_idx,
                     )
-                return cached.plate_text, True
+                # Bug 4 fix: đã gọi OCR → from_cache=False
+                best_text = plate_text if plate_text != "unknown" else cached.plate_text
+                return best_text, False
 
             # Đã đủ OCR quality → reuse hoàn toàn
             return cached.plate_text, True
 
         # Cache MISS — chạy OCR
-        plate_text = self._run_ocr(det, frame)
+        plate_text, ocr_conf = self._run_ocr(det, frame)
         if plate_text != "unknown":
             self._cache.add_or_update(
                 bbox=bbox,
                 plate_text=plate_text,
-                confidence=det.confidence,
+                confidence=ocr_conf,
                 frame_idx=self._frame_idx,
             )
 
         return plate_text, False
 
-    def _run_ocr(self, det: Detection, frame: np.ndarray) -> str:
+    def _run_ocr(self, det: Detection, frame: np.ndarray) -> tuple[str, float]:
         """Crop và chạy OCR cho một detection.
 
         Args:
@@ -199,14 +205,15 @@ class CachedPipeline:
             frame: Frame gốc.
 
         Returns:
-            Chuỗi biển số hoặc ``"unknown"``.
+            Tuple ``(plate_text, ocr_confidence)``.
         """
         crop = self._detector.crop_plate(
             det,
             frame,
             expand_ratio=self._crop_expand_ratio,
         )
-        return self._ocr.recognize(crop)
+        result = self._ocr.recognize_with_confidence(crop)
+        return result.text, result.confidence
 
     @property
     def cache(self) -> PlateTrackCache:
