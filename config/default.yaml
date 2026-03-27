@@ -54,6 +54,14 @@ ocr:
   rec_model_dir: ""          # Để trống = tự download model mặc định
   confidence_threshold: 0.6  # Ngưỡng confidence cho OCR result
 
+# --- OCR Cache (Frame Skipping) ---
+ocr_cache:
+  enabled: true              # Bật caching để tối ưu FPS
+  iou_threshold: 0.3         # Ngưỡng IOU match bbox (thấp vì FPS thấp → displacement lớn)
+  max_cache_size: 50          # Số plate tối đa trong cache
+  cache_ttl_frames: 150       # Số frame giữ entry trước khi expire
+  ocr_quality_frames: 3       # Số lần OCR tối đa cho cùng plate (lấy best confidence)
+
 # --- Image Preprocessing (crop + upscale + denoise + CLAHE) ---
 preprocessing:
   upscale_factor: 2.0           # Hệ số phóng to ảnh biển số (cv2.INTER_CUBIC)
