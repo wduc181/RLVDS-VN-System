@@ -330,7 +330,12 @@ def main() -> None:
             st.session_state["running"] = False
             video_placeholder.success(f"Completed - processed {frame_idx} frames.")
             break
-        raw_frame = frame.copy()
+        # Only perform an expensive full-frame copy when detection or persistence is enabled.
+        if st.session_state.get("enable_detection", False) or st.session_state.get("enable_persistence", False):
+            raw_frame = frame.copy()
+        else:
+            # When both are disabled, avoid the copy and just reference the current frame.
+            raw_frame = frame
 
         now = time.perf_counter()
         dt = now - prev_time
