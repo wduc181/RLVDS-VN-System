@@ -33,7 +33,7 @@ class Database:
     def connect(self) -> None:
         if self.conn is not None:
             return
-        self.conn = sqlite3.connect(self.connect_target, check_same_thread=False)
+        self.conn = sqlite3.connect(self.connect_target)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON;")
         self.conn.execute("PRAGMA journal_mode = WAL;")
