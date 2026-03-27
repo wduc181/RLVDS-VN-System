@@ -380,8 +380,6 @@ def main() -> None:
             for result in detection_results:
                 if not result.is_violation or result.plate_text == "unknown":
                     continue
-                if repo.exists_plate(result.plate_text):
-                    continue
                 det = result.detection
                 crop = det.crop(raw_frame)
                 processed_plate = None
