@@ -92,16 +92,16 @@ class ViolationRepository(BaseRepository):
         )
         return [ViolationRecord.from_row(r) for r in rows]
 
-    def get_by_plate(self, plate_text: str) -> list[ViolationRecord]:
-        rows = self._db.query_all(
+    def get_by_plate(self, plate_text: str) -> ViolationRecord | None:
+        row = self._db.query_one(
             """
             SELECT * FROM violations
             WHERE plate_text = ?
-            ORDER BY violation_time DESC;
+            LIMIT 1;
             """,
             (plate_text,),
         )
-        return [ViolationRecord.from_row(r) for r in rows]
+        return ViolationRecord.from_row(row) if row else None
 
     def get_by_date_range(self, start: str, end: str) -> list[ViolationRecord]:
         rows = self._db.query_all(
@@ -154,9 +154,15 @@ class ViolationRepository(BaseRepository):
         return len(invalid_ids)
 
     def export_csv(self, filepath: str) -> None:
-        rows = self.get_all(limit=1_000_000, offset=0)
         output = Path(filepath)
         output.parent.mkdir(parents=True, exist_ok=True)
+        rows = self._db.query_all(
+            """
+            SELECT *
+            FROM violations
+            ORDER BY violation_time DESC;
+            """
+        )
         with output.open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(
@@ -172,7 +178,8 @@ class ViolationRepository(BaseRepository):
                     "zone_id",
                 ]
             )
-            for r in rows:
+            for row in rows:
+                r = ViolationRecord.from_row(row)
                 writer.writerow(
                     [
                         r.id,
@@ -274,6 +281,8 @@ class ViolationRepository(BaseRepository):
             logger.debug("record_violation skipped duplicated plate: %s", plate_text)
             return None
 
+        full_image_path: str | None = None
+        plate_image_path: str | None = None
         try:
             full_image_path, plate_image_path = self.save_violation_images(
                 frame=frame,
@@ -295,6 +304,8 @@ class ViolationRepository(BaseRepository):
         except Exception:
             # Rollback row when image persistence fails, avoid orphan DB records.
             self._db.execute("DELETE FROM violations WHERE id = ?;", (violation_id,))
+            self._safe_remove_file(full_image_path)
+            self._safe_remove_file(plate_image_path)
             raise
 
         return violation_id

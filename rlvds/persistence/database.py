@@ -15,21 +15,25 @@ class Database:
     """Thin wrapper around sqlite3 connection with schema bootstrap."""
 
     def __init__(self, db_path_or_url: str = "sqlite:///data/rlvds.db") -> None:
-        self.db_path = self._resolve_db_path(db_path_or_url)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.connect_target, self.db_path = self._resolve_db_path(db_path_or_url)
+        if self.db_path is not None:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn: sqlite3.Connection | None = None
 
     @staticmethod
-    def _resolve_db_path(value: str) -> Path:
+    def _resolve_db_path(value: str) -> tuple[str, Path | None]:
         prefix = "sqlite:///"
         if value.startswith(prefix):
             value = value[len(prefix):]
-        return Path(value).expanduser().resolve()
+        if value == ":memory:":
+            return value, None
+        resolved = Path(value).expanduser().resolve()
+        return str(resolved), resolved
 
     def connect(self) -> None:
         if self.conn is not None:
             return
-        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self.conn = sqlite3.connect(self.connect_target, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON;")
         self.conn.execute("PRAGMA journal_mode = WAL;")
@@ -78,7 +82,7 @@ class Database:
         self.execute(
             "CREATE INDEX IF NOT EXISTS idx_violations_light_state ON violations(light_state);"
         )
-        logger.info("SQLite schema ready: %s", self.db_path)
+        logger.info("SQLite schema ready: %s", self.connect_target)
 
     def execute(self, query: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         self._ensure_connected()

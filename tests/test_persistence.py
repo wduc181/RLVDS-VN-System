@@ -17,6 +17,25 @@ def _build_repo(tmp_path: Path) -> ViolationRepository:
     return ViolationRepository(db, violations_dir=str(tmp_path / "violations"))
 
 
+def test_database_supports_sqlite_memory() -> None:
+    db = Database(":memory:")
+    db.connect()
+    db.create_tables()
+    db.execute(
+        """
+        INSERT INTO violations (
+            plate_text, violation_time, light_state, status,
+            full_image_path, plate_image_path, confidence, zone_id
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+        """,
+        ("11A-11111", "2026-03-25T10:00:00", "RED", "VIOLATION", "", "", 0.9, "z"),
+    )
+    row = db.query_one("SELECT COUNT(*) AS c FROM violations;")
+    assert row is not None and int(row["c"]) == 1
+    db.disconnect()
+
+
 def test_crud_and_dedup_by_plate(tmp_path: Path) -> None:
     repo = _build_repo(tmp_path)
     record = ViolationRecord(
@@ -124,3 +143,22 @@ def test_delete_does_not_remove_files_outside_violations_dir(tmp_path: Path) -> 
     violation_id = int(cur.lastrowid)
     assert repo.delete(violation_id) is True
     assert outside_file.exists()
+
+
+def test_export_csv_exports_all_rows(tmp_path: Path) -> None:
+    repo = _build_repo(tmp_path)
+    for idx in range(5):
+        rec = ViolationRecord(
+            plate_text=f"30A-12{idx:03d}",
+            violation_time=f"2026-03-25T10:00:0{idx}",
+            light_state="RED",
+            status="VIOLATION",
+            confidence=0.8,
+            zone_id="z1",
+        )
+        repo.save(rec)
+
+    output = tmp_path / "violations.csv"
+    repo.export_csv(str(output))
+    lines = output.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 6  # header + 5 rows

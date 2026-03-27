@@ -1,14 +1,11 @@
-﻿"""
-RLVDS-VN Streamlit Web Application
-===================================
+"""
+RLVDS-VN Streamlit Web Application.
 
-Má»¥c Ä‘Ã­ch:
-    Entry point cho giao diá»‡n web Streamlit.
-    Hiá»ƒn thá»‹ video stream real-time vÃ  violation history.
-
-CÃ¡ch cháº¡y:
+Run:
     streamlit run app.py
 """
+
+from __future__ import annotations
 
 import time
 import warnings
@@ -21,7 +18,12 @@ import streamlit as st
 warnings.filterwarnings("ignore", message=".*torch.cuda.amp.autocast.*")
 
 from config.settings import get_settings
+from rlvds.core.mini_pipeline import MiniPipeline
+from rlvds.detection import LicensePlateDetector
 from rlvds.ingestion import FrameBuffer, VideoSource
+from rlvds.ocr.preprocessor import PlatePreprocessor
+from rlvds.ocr.recognizer import LicensePlateOCR
+from rlvds.persistence import Database, ViolationRepository
 from rlvds.spatial import ViolationZone
 from rlvds.temporal import TrafficLightFSM, ViolationDetector
 from rlvds.utils.logger import get_logger
@@ -32,17 +34,11 @@ from rlvds.utils.visualization import (
     draw_zone_overlay,
     set_hd_resolution,
 )
-from rlvds.core.mini_pipeline import MiniPipeline
-from rlvds.detection import LicensePlateDetector
-from rlvds.ocr.preprocessor import PlatePreprocessor
-from rlvds.ocr.recognizer import LicensePlateOCR
-from rlvds.persistence import Database, ViolationRepository
 
 logger = get_logger(__name__)
 
 
 def _list_sample_videos(samples_dir: str) -> list[str]:
-    """Tráº£ vá» danh sÃ¡ch file video trong thÆ° má»¥c samples."""
     p = Path(samples_dir)
     if not p.is_dir():
         return []
@@ -51,12 +47,11 @@ def _list_sample_videos(samples_dir: str) -> list[str]:
 
 
 def _cleanup_video_source() -> None:
-    """Giải phóng VideoSource đang lưu trong session_state."""
     db = st.session_state.pop("violation_db", None)
     if db is not None:
         try:
             db.disconnect()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Error while disconnecting database: %s", exc)
 
     src = st.session_state.pop("video_src", None)
@@ -66,21 +61,25 @@ def _cleanup_video_source() -> None:
             "Video source released after %d frames",
             st.session_state.get("frame_idx", 0),
         )
-    st.session_state.pop("frame_idx", None)
-    st.session_state.pop("total_frames", None)
-    st.session_state.pop("resolution", None)
-    st.session_state.pop("traffic_light", None)
-    st.session_state.pop("zone", None)
-    st.session_state.pop("violation_detector", None)
-    st.session_state.pop("frame_buffer", None)
-    st.session_state.pop("violation_count", None)
-    st.session_state.pop("mini_pipeline", None)
-    st.session_state.pop("detection_available", None)
-    st.session_state.pop("violation_repo", None)
-    st.session_state.pop("plate_preprocessor", None)
+
+    for key in (
+        "frame_idx",
+        "total_frames",
+        "resolution",
+        "traffic_light",
+        "zone",
+        "violation_detector",
+        "frame_buffer",
+        "violation_count",
+        "mini_pipeline",
+        "detection_available",
+        "violation_repo",
+        "plate_preprocessor",
+    ):
+        st.session_state.pop(key, None)
+
 
 def _build_runtime_components() -> tuple[ViolationZone, TrafficLightFSM, ViolationDetector, FrameBuffer]:
-    """Khá»Ÿi táº¡o spatial/temporal components cho phiÃªn stream hiá»‡n táº¡i."""
     settings = get_settings()
     zone = ViolationZone(
         vertices=settings.spatial.violation_zone,
@@ -106,54 +105,42 @@ def _build_runtime_components() -> tuple[ViolationZone, TrafficLightFSM, Violati
 
 
 def main() -> None:
-    """Streamlit app main function."""
     st.set_page_config(page_title="RLVDS-VN", layout="wide")
-    st.title("ðŸš¦ RLVDS-VN â€” Video Stream Test")
+    st.title("RLVDS-VN - Video Stream Test")
 
     settings = get_settings()
 
-    # â”€â”€ Sidebar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     with st.sidebar:
         st.header("Video Source")
-
         sample_videos = _list_sample_videos(settings.paths.samples_dir)
-
         if not sample_videos:
-            st.warning("KhÃ´ng tÃ¬m tháº¥y video máº«u trong data/samples/")
+            st.warning("No sample video found in data/samples/")
             source_path = None
         else:
             source_path = st.selectbox(
-                "Chá»n video máº«u",
+                "Select sample video",
                 options=sample_videos,
                 index=0,
-                help="Chá»n file trong data/samples/",
             )
 
-        display_width = st.slider(
-            "Display width (px)", 480, 1920, 1280, step=80,
-        )
-
-        show_fps = st.checkbox("Hiá»ƒn thá»‹ FPS", value=True)
-        show_zone_overlay = st.checkbox("Hiá»ƒn thá»‹ zone overlay", value=True)
+        display_width = st.slider("Display width (px)", 480, 1920, 1280, step=80)
+        show_fps = st.checkbox("Show FPS", value=True)
+        show_zone_overlay = st.checkbox("Show zone overlay", value=True)
         show_detection = st.checkbox(
-            "Nháº­n diá»‡n biá»ƒn sá»‘",
+            "Enable plate detection",
             value=False,
-            help="Báº­t detection + OCR overlay lÃªn video",
+            help="Enable detection + OCR overlay",
         )
 
-        # Warning only after pipeline init attempted (mini_pipeline key exists)
         if (
             show_detection
             and st.session_state.get("running", False)
             and "mini_pipeline" in st.session_state
             and not st.session_state.get("detection_available", False)
         ):
-            st.warning("Model detection chÆ°a Ä‘Æ°á»£c load. Kiá»ƒm tra detection.model_path trong config.")
+            st.warning("Detection model is not available. Check detection.model_path.")
 
-        target_fps = st.slider(
-            "Target FPS", 1, 60, 30,
-            help="Giá»›i háº¡n tá»‘c Ä‘á»™ hiá»ƒn thá»‹ (frame/giÃ¢y)",
-        )
+        target_fps = st.slider("Target FPS", 1, 60, 30)
 
         st.divider()
         st.subheader("Spatial Zone")
@@ -161,7 +148,7 @@ def main() -> None:
             st.caption("Vertices (x, y):")
             st.code(str(settings.spatial.violation_zone), language="python")
         else:
-            st.info("`spatial.violation_zone` Ä‘ang rá»—ng. App sáº½ dÃ¹ng dummy polygon.")
+            st.info("spatial.violation_zone is empty. App will use dummy polygon.")
 
         st.subheader("Traffic Light Cycle")
         st.caption(
@@ -175,19 +162,18 @@ def main() -> None:
         can_start = source_path is not None and not is_running
 
         st.button(
-            "â–¶ Start",
+            "Start",
             use_container_width=True,
             disabled=not can_start,
             on_click=lambda: st.session_state.update(should_start=True),
         )
         st.button(
-            "â¹ Stop",
+            "Stop",
             use_container_width=True,
             disabled=not is_running,
             on_click=lambda: st.session_state.update(running=False),
         )
 
-    # â”€â”€ Main area placeholders â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     video_placeholder = st.empty()
     metrics_col1, metrics_col2, metrics_col3, metrics_col4, metrics_col5 = st.columns(5)
     fps_display = metrics_col1.empty()
@@ -197,27 +183,23 @@ def main() -> None:
     timer_display = metrics_col5.empty()
     violation_count_display = st.empty()
 
-    # â”€â”€ Handle Start â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if st.session_state.pop("should_start", False) and source_path:
         _cleanup_video_source()
 
         try:
             src = VideoSource(source_path)
         except (FileNotFoundError, RuntimeError) as exc:
-            st.error(f"KhÃ´ng thá»ƒ má»Ÿ video: {exc}")
+            st.error(f"Cannot open video source: {exc}")
             return
 
         w, h = src.get_frame_size()
         total_frames = src.get_frame_count()
-        logger.info(
-            "Streaming %s â€” %d frames, %dx%d",
-            source_path, total_frames, w, h,
-        )
+        logger.info("Streaming %s - %d frames, %dx%d", source_path, total_frames, w, h)
 
         st.session_state["video_src"] = src
         st.session_state["frame_idx"] = 0
         st.session_state["total_frames"] = total_frames
-        st.session_state["resolution"] = f"{w}Ã—{h}"
+        st.session_state["resolution"] = f"{w}x{h}"
         zone, traffic_light, violation_detector, frame_buffer = _build_runtime_components()
         st.session_state["zone"] = zone
         st.session_state["traffic_light"] = traffic_light
@@ -225,7 +207,6 @@ def main() -> None:
         st.session_state["frame_buffer"] = frame_buffer
         st.session_state["violation_count"] = 0
 
-        # Initialize persistence for unique violation logging
         try:
             db = Database(settings.database.url)
             repo = ViolationRepository(
@@ -237,13 +218,12 @@ def main() -> None:
             st.session_state["violation_repo"] = repo
             st.session_state["plate_preprocessor"] = preprocessor
             logger.info("Persistence initialized: %s", settings.database.url)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to initialize persistence: %s", exc)
             st.session_state["violation_db"] = None
             st.session_state["violation_repo"] = None
             st.session_state["plate_preprocessor"] = None
 
-        # Initialize detection pipeline
         try:
             detector = LicensePlateDetector(
                 model_path=settings.detection.model_path,
@@ -269,39 +249,35 @@ def main() -> None:
                 logger.info("Detection pipeline initialized successfully")
             else:
                 logger.warning("Detection model not available - detection disabled")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to initialize detection pipeline: %s", exc)
             st.session_state["mini_pipeline"] = None
             st.session_state["detection_available"] = False
 
         st.session_state["running"] = True
 
-    # â”€â”€ Handle Stop / cleanup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if not st.session_state.get("running", False):
         if "video_src" in st.session_state:
             _cleanup_video_source()
-        video_placeholder.info("Nháº¥n **â–¶ Start** Ä‘á»ƒ báº¯t Ä‘áº§u stream video.")
+        video_placeholder.info("Press Start to begin video stream.")
         return
 
-    # â”€â”€ Video streaming (while loop â€” no st.rerun) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     src = st.session_state.get("video_src")
     zone = st.session_state.get("zone")
     traffic_light = st.session_state.get("traffic_light")
     if src is None or not src.is_opened():
         _cleanup_video_source()
         st.session_state["running"] = False
-        video_placeholder.warning("Video source khÃ´ng kháº£ dá»¥ng.")
+        video_placeholder.warning("Video source is not available.")
         return
     if zone is None or traffic_light is None:
         _cleanup_video_source()
         st.session_state["running"] = False
-        video_placeholder.warning("Spatial/Temporal components chÆ°a Ä‘Æ°á»£c khá»Ÿi táº¡o.")
+        video_placeholder.warning("Spatial/Temporal components are not initialized.")
         return
 
     total_frames = st.session_state.get("total_frames", 0)
-    resolution_display.metric(
-        "Resolution", st.session_state.get("resolution", "â€“"),
-    )
+    resolution_display.metric("Resolution", st.session_state.get("resolution", "-"))
 
     frame_interval = 1.0 / target_fps
     prev_time = time.perf_counter()
@@ -312,13 +288,10 @@ def main() -> None:
             frame_idx = st.session_state.get("frame_idx", 0)
             _cleanup_video_source()
             st.session_state["running"] = False
-            video_placeholder.success(
-                f"HoÃ n táº¥t â€” Ä‘Ã£ xá»­ lÃ½ {frame_idx} frames.",
-            )
+            video_placeholder.success(f"Completed - processed {frame_idx} frames.")
             break
         raw_frame = frame.copy()
 
-        # FPS tÃ­nh toÃ¡n
         now = time.perf_counter()
         dt = now - prev_time
         fps = int(1 / dt) if dt > 0 else 0
@@ -341,7 +314,6 @@ def main() -> None:
         else:
             zone.draw(frame)
 
-        # Detection + OCR overlay
         detection_results = []
         if show_detection:
             pipeline = st.session_state.get("mini_pipeline")
@@ -349,16 +321,17 @@ def main() -> None:
                 try:
                     detection_results = pipeline.process_frame(frame)
                     draw_detections(frame, detection_results)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     logger.error("Detection failed on frame %d: %s", frame_idx, exc)
 
-        # Persist unique violations to SQLite + save scene/plate images
         saved_violations = 0
         repo = st.session_state.get("violation_repo")
         preprocessor = st.session_state.get("plate_preprocessor")
         if repo is not None and detection_results:
             for result in detection_results:
                 if not result.is_violation or result.plate_text == "unknown":
+                    continue
+                if repo.exists_plate(result.plate_text):
                     continue
                 det = result.detection
                 crop = det.crop(raw_frame)
@@ -385,33 +358,25 @@ def main() -> None:
             st.session_state["violation_count"] = current_count + saved_violations
 
         draw_light_status(frame, light_state)
-
-        # Váº½ FPS lÃªn frame náº¿u Ä‘Æ°á»£c báº­t
         if show_fps:
             draw_fps(frame, fps)
 
-        # Resize cho hiá»ƒn thá»‹
         display_frame = set_hd_resolution(frame, width=display_width)
-
-        # BGR â†’ RGB cho Streamlit
         display_frame = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
 
-        # Cáº­p nháº­t UI (in-place, khÃ´ng rerun toÃ n trang)
-        # Wrap in try/except to handle transient Streamlit cache errors
         try:
             video_placeholder.image(display_frame, channels="RGB")
-        except Exception:
-            pass  # Transient MediaFileStorageError - safe to ignore
+        except Exception:  # noqa: BLE001
+            pass
         fps_display.metric("FPS", fps)
         frame_count_display.metric("Frame", f"{frame_idx}/{total_frames}")
         light_state_display.metric("Light State", light_state)
         timer_display.metric("Time Remaining (s)", f"{time_remaining:.1f}")
         violation_count_display.metric(
-            "Violation Count (preview)",
+            "Violation Count",
             st.session_state.get("violation_count", 0),
         )
 
-        # Throttle theo target FPS
         elapsed = time.perf_counter() - now
         sleep_time = frame_interval - elapsed
         if sleep_time > 0:
@@ -420,4 +385,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

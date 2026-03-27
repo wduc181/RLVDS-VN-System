@@ -345,7 +345,7 @@ class BaseRepository(ABC):
     """Interface cho tầng persistence (SQLite repository pattern)."""
 
     @abstractmethod
-    def save(self, entity: Any) -> None:
+    def save(self, entity: Any) -> Any:
         """Lưu một entity vào database.
 
         Args:
@@ -381,3 +381,4 @@ class BaseRepository(ABC):
         Returns:
             ``True`` nếu xóa thành công.
         """
+
