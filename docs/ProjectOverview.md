@@ -135,7 +135,8 @@ Video → [Polygon Mask] → [YOLO Detect] → [Crop & Preprocess] → [OCR] →
 * **Sai số thời gian:** Logic đèn đỏ giả lập có thể không khớp hoàn toàn với đèn thực tế nếu không có sự đồng bộ từ sensor.
 * **Tọa độ vật thể:** Nếu xe chỉ lấn một phần nhỏ vào vùng đa giác, việc xác định vi phạm cần cấu hình ngưỡng chính xác để tránh tranh cãi.
 * **Chất lượng video:** Video có độ phân giải thấp hoặc rung lắc có thể làm biển số bị biến dạng.
-* **Lỗi OCR:** Ký tự dễ nhầm lẫn (O/0, B/8, G/6) — cần post-processing logic.
+* **Lỗi OCR:** Ký tự dễ nhầm lẫn (O/0, B/8, G/6) — cần post-processing logic. Ngoài ra PaddleOCR có thể  phải đọc từng frame một nên từng frame phải đi qua Yolov5 và Paddle với độ trễ nhất định => vòng lặp video bắt buộc phải dừng lại chờ PaddleOCR đọc xong từng chữ một, nên FPS bị tụt nghiêm trọng
+
 * **Biển số 2 dòng:** Xe máy có biển số 2 hàng, cần phân loại line alignment chính xác.
 
 ---
@@ -172,7 +173,7 @@ Video → [Polygon Mask] → [YOLO Detect] → [Crop & Preprocess] → [OCR] →
 ### Phase 4: Testing & Hoàn thiện (Tuần 8)
 | Task | Mô tả | Status |
 |------|-------|--------|
-| Unit Testing | Viết tests cho từng module | ⬜ Not Started |
+| Unit Testing | Viết tests cho từng module | 🔄 In Progress |
 | Integration Testing | Test toàn bộ pipeline | 🔄 In Progress|
 | Performance Tuning | Tối ưu tốc độ xử lý | 🔄 In Progress |
 | Documentation | Hoàn thiện docs | 🔄 In Progress |
