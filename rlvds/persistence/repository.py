@@ -6,7 +6,7 @@ import csv
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import cv2
 import numpy as np
@@ -15,7 +15,13 @@ from config.settings import get_settings
 from rlvds.core.base import BaseRepository, Detection, Violation
 from rlvds.ocr.postprocess import check_valid_plate
 from rlvds.persistence.database import Database
-from rlvds.persistence.models import ViolationRecord
+from rlvds.persistence.models import (
+    DailyStat,
+    ViolationCreate,
+    ViolationRecord,
+    ViolationStatistics,
+    ViolationUpdate,
+)
 from rlvds.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -42,6 +48,12 @@ class ViolationRepository(BaseRepository):
 
     def save(self, entity: Any) -> int | None:
         record = self._normalize_entity(entity)
+        if not check_valid_plate(record.plate_text):
+            logger.warning("Skip invalid plate_text: %s", record.plate_text)
+            return None
+        if self.exists_plate(record.plate_text):
+            logger.debug("Skip duplicate violation for plate: %s", record.plate_text)
+            return None
         cur = self._db.execute(
             """
             INSERT INTO violations (
@@ -74,6 +86,11 @@ class ViolationRepository(BaseRepository):
         )
         return violation_id
 
+    def create(self, payload: ViolationCreate | ViolationRecord | Violation | dict[str, Any]) -> int | None:
+        if isinstance(payload, dict):
+            return self.save(ViolationCreate.model_validate(payload))
+        return self.save(payload)
+
     def get_by_id(self, entity_id: int) -> ViolationRecord | None:
         row = self._db.query_one(
             "SELECT * FROM violations WHERE id = ?;",
@@ -93,15 +110,23 @@ class ViolationRepository(BaseRepository):
         return [ViolationRecord.from_row(r) for r in rows]
 
     def get_by_plate(self, plate_text: str) -> ViolationRecord | None:
-        row = self._db.query_one(
+        rows = self.get_all_by_plate(plate_text=plate_text, limit=1)
+        return rows[0] if rows else None
+
+    def get_all_by_plate(self, plate_text: str, limit: int = 100) -> list[ViolationRecord]:
+        normalized = self._normalize_plate_text(plate_text)
+        if not normalized:
+            return []
+        rows = self._db.query_all(
             """
             SELECT * FROM violations
             WHERE plate_text = ?
-            LIMIT 1;
+            ORDER BY violation_time DESC
+            LIMIT ?;
             """,
-            (plate_text,),
+            (normalized, limit),
         )
-        return ViolationRecord.from_row(row) if row else None
+        return [ViolationRecord.from_row(r) for r in rows]
 
     def get_by_date_range(self, start: str, end: str) -> list[ViolationRecord]:
         rows = self._db.query_all(
@@ -114,12 +139,27 @@ class ViolationRepository(BaseRepository):
         )
         return [ViolationRecord.from_row(r) for r in rows]
 
-    def update_status(self, violation_id: int, status: str) -> bool:
+    def update(self, violation_id: int, patch: ViolationUpdate | dict[str, Any]) -> bool:
+        payload = patch if isinstance(patch, ViolationUpdate) else ViolationUpdate.model_validate(patch)
+        updates = payload.to_update_dict()
+        if not updates:
+            return False
+
+        if "plate_text" in updates and self.exists_plate(updates["plate_text"], exclude_id=violation_id):
+            logger.debug("Skip update due to duplicate plate_text: %s", updates["plate_text"])
+            return False
+
+        columns = list(updates.keys())
+        values = [updates[col] for col in columns]
+        set_clause = ", ".join(f"{col} = ?" for col in columns)
         cur = self._db.execute(
-            "UPDATE violations SET status = ? WHERE id = ?;",
-            (status, violation_id),
+            f"UPDATE violations SET {set_clause} WHERE id = ?;",
+            (*values, violation_id),
         )
         return cur.rowcount > 0
+
+    def update_status(self, violation_id: int, status: str) -> bool:
+        return self.update(violation_id, {"status": status})
 
     def delete(self, entity_id: int) -> bool:
         row = self._db.query_one(
@@ -134,34 +174,113 @@ class ViolationRepository(BaseRepository):
             self._safe_remove_file(row["plate_image_path"])
         return True
 
-    def count(self) -> int:
-        row = self._db.query_one("SELECT COUNT(*) AS c FROM violations;")
+    def count(
+        self,
+        *,
+        status: str | None = None,
+        light_state: str | None = None,
+        zone_id: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+    ) -> int:
+        where_sql, params = self._build_filters(
+            status=status,
+            light_state=light_state,
+            zone_id=zone_id,
+            start=start,
+            end=end,
+        )
+        row = self._db.query_one(
+            f"SELECT COUNT(*) AS c FROM violations{where_sql};",
+            params,
+        )
         return int(row["c"]) if row else 0
 
-    def exists_plate(self, plate_text: str) -> bool:
+    def exists_plate(self, plate_text: str, exclude_id: int | None = None) -> bool:
+        normalized = self._normalize_plate_text(plate_text)
+        if not normalized:
+            return False
+        if exclude_id is None:
+            row = self._db.query_one(
+                "SELECT 1 FROM violations WHERE plate_text = ? LIMIT 1;",
+                (normalized,),
+            )
+            return row is not None
+
         row = self._db.query_one(
-            "SELECT 1 FROM violations WHERE plate_text = ? LIMIT 1;",
-            (plate_text,),
+            "SELECT 1 FROM violations WHERE plate_text = ? AND id != ? LIMIT 1;",
+            (normalized, exclude_id),
         )
         return row is not None
 
     def clean_data(self) -> int:
-        """Remove invalid plate formats from DB."""
-        rows = self._db.query_all("SELECT id, plate_text FROM violations;")
-        invalid_ids = [int(r["id"]) for r in rows if not check_valid_plate(str(r["plate_text"]))]
-        for vid in invalid_ids:
-            self.delete(vid)
-        return len(invalid_ids)
-
-    def export_csv(self, filepath: str) -> None:
-        output = Path(filepath)
-        output.parent.mkdir(parents=True, exist_ok=True)
+        """Normalize plates, remove invalid records and deduplicate by plate."""
         rows = self._db.query_all(
             """
+            SELECT id, plate_text
+            FROM violations
+            ORDER BY id ASC;
+            """
+        )
+        seen: set[str] = set()
+        ids_to_remove: list[int] = []
+        updates: list[tuple[str, int]] = []
+
+        for row in rows:
+            raw_plate = str(row["plate_text"] or "")
+            try:
+                normalized = self._normalize_plate_text(raw_plate)
+            except Exception:
+                normalized = raw_plate.strip().upper()
+
+            if not check_valid_plate(normalized):
+                ids_to_remove.append(int(row["id"]))
+                continue
+
+            if normalized in seen:
+                ids_to_remove.append(int(row["id"]))
+                continue
+
+            seen.add(normalized)
+            if normalized != raw_plate:
+                updates.append((normalized, int(row["id"])))
+
+        for row_id in ids_to_remove:
+            self.delete(row_id)
+        for plate_text, row_id in updates:
+            self._db.execute(
+                "UPDATE violations SET plate_text = ? WHERE id = ?;",
+                (plate_text, row_id),
+            )
+        return len(ids_to_remove)
+
+    def export_csv(
+        self,
+        filepath: str,
+        *,
+        status: str | None = None,
+        light_state: str | None = None,
+        zone_id: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+    ) -> int:
+        output = Path(filepath)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        where_sql, params = self._build_filters(
+            status=status,
+            light_state=light_state,
+            zone_id=zone_id,
+            start=start,
+            end=end,
+        )
+        rows = self._db.query_all(
+            f"""
             SELECT *
             FROM violations
+            {where_sql}
             ORDER BY violation_time DESC;
-            """
+            """,
+            params,
         )
         with output.open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
@@ -193,6 +312,58 @@ class ViolationRepository(BaseRepository):
                         r.zone_id,
                     ]
                 )
+        return len(rows)
+
+    def get_statistics(
+        self,
+        *,
+        status: str | None = None,
+        light_state: str | None = None,
+        zone_id: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        recent_days: int = 7,
+    ) -> ViolationStatistics:
+        where_sql, params = self._build_filters(
+            status=status,
+            light_state=light_state,
+            zone_id=zone_id,
+            start=start,
+            end=end,
+        )
+        recent_days = max(1, int(recent_days))
+
+        total = self.count(
+            status=status,
+            light_state=light_state,
+            zone_id=zone_id,
+            start=start,
+            end=end,
+        )
+        by_status = self._group_count("status", where_sql, params)
+        by_light = self._group_count("light_state", where_sql, params)
+        by_zone = self._group_count("zone_id", where_sql, params)
+
+        daily_rows = self._db.query_all(
+            f"""
+            SELECT substr(violation_time, 1, 10) AS day, COUNT(*) AS c
+            FROM violations
+            {where_sql}
+            GROUP BY day
+            ORDER BY day DESC
+            LIMIT ?;
+            """,
+            (*params, recent_days),
+        )
+        daily = [DailyStat(date=str(r["day"]), count=int(r["c"])) for r in daily_rows]
+
+        return ViolationStatistics(
+            total=total,
+            by_status=by_status,
+            by_light_state=by_light,
+            by_zone=by_zone,
+            daily=daily,
+        )
 
     # ------------------------------------------------------------------
     # Violation asset management
@@ -321,11 +492,85 @@ class ViolationRepository(BaseRepository):
 
     @staticmethod
     def _normalize_entity(entity: Any) -> ViolationRecord:
+        if isinstance(entity, ViolationCreate):
+            return entity.to_record()
         if isinstance(entity, ViolationRecord):
             return entity
         if isinstance(entity, Violation):
             return ViolationRecord.from_violation(entity)
+        if isinstance(entity, dict):
+            return ViolationCreate.model_validate(entity).to_record()
         raise TypeError(f"Unsupported entity type for save(): {type(entity)!r}")
+
+    @staticmethod
+    def _normalize_plate_text(plate_text: str) -> str | None:
+        try:
+            return ViolationRecord.model_validate(
+                {
+                    "plate_text": plate_text,
+                    "violation_time": datetime.now().isoformat(timespec="seconds"),
+                    "light_state": "UNKNOWN",
+                    "status": "UNKNOWN",
+                    "confidence": 0.0,
+                }
+            ).plate_text
+        except Exception:
+            return None
+
+    def _build_filters(
+        self,
+        *,
+        status: str | None = None,
+        light_state: str | None = None,
+        zone_id: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+    ) -> tuple[str, tuple[Any, ...]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(str(status).strip().upper())
+        if light_state is not None:
+            clauses.append("light_state = ?")
+            params.append(str(light_state).strip().upper())
+        if zone_id is not None:
+            clauses.append("zone_id = ?")
+            params.append(str(zone_id).strip())
+        if start is not None and end is not None:
+            clauses.append("violation_time BETWEEN ? AND ?")
+            params.extend([str(start), str(end)])
+        elif start is not None:
+            clauses.append("violation_time >= ?")
+            params.append(str(start))
+        elif end is not None:
+            clauses.append("violation_time <= ?")
+            params.append(str(end))
+
+        if not clauses:
+            return "", tuple()
+        return " WHERE " + " AND ".join(clauses), tuple(params)
+
+    def _group_count(
+        self,
+        column: str,
+        where_sql: str,
+        params: Sequence[Any],
+    ) -> dict[str, int]:
+        if column not in {"status", "light_state", "zone_id"}:
+            raise ValueError(f"Unsupported group column: {column}")
+        rows = self._db.query_all(
+            f"""
+            SELECT {column} AS key, COUNT(*) AS c
+            FROM violations
+            {where_sql}
+            GROUP BY {column}
+            ORDER BY c DESC;
+            """,
+            params,
+        )
+        return {str(r["key"]): int(r["c"]) for r in rows}
 
     @staticmethod
     def _safe_write(path: Path, image: np.ndarray) -> None:
