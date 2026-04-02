@@ -501,19 +501,23 @@ class ViolationRepository(BaseRepository):
 
     @staticmethod
     def _normalize_plate_text(plate_text: str) -> str | None:
-        try:
-            return ViolationRecord.model_validate(
-                {
-                    "plate_text": plate_text,
-                    "violation_time": datetime.now().isoformat(timespec="seconds"),
-                    "light_state": "UNKNOWN",
-                    "status": "UNKNOWN",
-                    "confidence": 0.0,
-                }
-            ).plate_text
-        except Exception:
+        """
+        Lightweight normalization/validation for plate text used in lookups.
+
+        Avoids the overhead of constructing a full ViolationRecord model and instead
+        relies on the OCR postprocess helper to validate/normalize the plate.
+        """
+        if plate_text is None:
+            return None
+        candidate = plate_text.strip()
+        if not candidate:
             return None
 
+        # Delegate to OCR postprocessing helper which encapsulates plate rules.
+        normalized = check_valid_plate(candidate)
+        if not normalized:
+            return None
+        return normalized
     def _build_filters(
         self,
         *,
