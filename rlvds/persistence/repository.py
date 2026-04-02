@@ -51,9 +51,6 @@ class ViolationRepository(BaseRepository):
         if not check_valid_plate(record.plate_text):
             logger.warning("Skip invalid plate_text: %s", record.plate_text)
             return None
-        if self.exists_plate(record.plate_text):
-            logger.debug("Skip duplicate violation for plate: %s", record.plate_text)
-            return None
         cur = self._db.execute(
             """
             INSERT INTO violations (
