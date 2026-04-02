@@ -82,6 +82,12 @@ class Database:
         self.execute(
             "CREATE INDEX IF NOT EXISTS idx_violations_light_state ON violations(light_state);"
         )
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_violations_status ON violations(status);"
+        )
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_violations_zone ON violations(zone_id);"
+        )
         logger.info("SQLite schema ready: %s", self.connect_target)
 
     def execute(self, query: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
