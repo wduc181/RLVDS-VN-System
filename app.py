@@ -175,7 +175,9 @@ def main() -> None:
         )
 
         is_running = st.session_state.get("running", False)
-        can_start = source_path is not None and not is_running
+        should_start = st.session_state.get("should_start", False)
+        effective_running = is_running or should_start
+        can_start = source_path is not None and not effective_running
 
         st.button(
             "Start",
@@ -186,7 +188,7 @@ def main() -> None:
         st.button(
             "Stop",
             use_container_width=True,
-            disabled=not is_running,
+            disabled=not effective_running,
             on_click=lambda: st.session_state.update(running=False),
         )
 
