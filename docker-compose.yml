@@ -1,0 +1,20 @@
+services:
+  rlvds:
+    build:
+      context: .
+      args:
+        PADDLE_PACKAGE: ${PADDLE_PACKAGE:-paddlepaddle==2.6.2}
+    image: rlvds-vn-system:latest
+    ports:
+      - "8501:8501"
+    environment:
+      RLVDS_DATABASE__URL: sqlite:////tmp/rlvds/rlvds.db
+      RLVDS_PATHS__VIOLATIONS_DIR: /tmp/rlvds/violations
+      RLVDS_DETECTION__DEVICE: cpu
+      RLVDS_OCR__USE_GPU: "false"
+    tmpfs:
+      - /tmp/rlvds:rw,nosuid,nodev,size=512m
+    volumes:
+      - ./data/samples:/app/data/samples:ro
+      - ./weights:/app/weights:ro
+    stop_signal: SIGINT

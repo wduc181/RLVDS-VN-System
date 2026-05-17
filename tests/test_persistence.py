@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,6 +36,35 @@ def test_database_supports_sqlite_memory() -> None:
     )
     row = db.query_one("SELECT COUNT(*) AS c FROM violations;")
     assert row is not None and int(row["c"]) == 1
+    db.disconnect()
+
+
+def test_database_connection_can_be_reused_across_threads(tmp_path: Path) -> None:
+    db = Database(str(tmp_path / "threaded.db"))
+    db.create_tables()
+    errors: list[Exception] = []
+
+    def insert_row(index: int) -> None:
+        try:
+            db.execute(
+                """
+                INSERT INTO violations (plate_text, violation_time, light_state)
+                VALUES (?, ?, ?);
+                """,
+                (f"30A-{index:05d}", "2026-03-25T10:00:00", "RED"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=insert_row, args=(i,)) for i in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    row = db.query_one("SELECT COUNT(*) AS c FROM violations;")
+    assert errors == []
+    assert row is not None and int(row["c"]) == 8
     db.disconnect()
 
 

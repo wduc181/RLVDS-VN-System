@@ -66,7 +66,11 @@ class LicensePlateOCR(BaseOCR):
             return OCRResult(text="unknown", confidence=0.0)
 
         processed = self.preprocess(image)
-        result = self._ocr.ocr(processed)
+        try:
+            result = self._ocr.ocr(processed, cls=False)
+        except TypeError:
+            # Test doubles and older wrappers may not expose PaddleOCR's cls kwarg.
+            result = self._ocr.ocr(processed)
         parsed = self._parse_paddle_result(result)
         if parsed is None:
             return OCRResult(text="unknown", confidence=0.0)
@@ -96,6 +100,7 @@ class LicensePlateOCR(BaseOCR):
             return PaddleOCR(
                 lang=self._lang,
                 use_gpu=False,  # LUÔN dùng CPU để tránh xung đột cuDNN
+                use_angle_cls=False,
                 show_log=False,
             )
         except Exception as e1:
@@ -104,7 +109,7 @@ class LicensePlateOCR(BaseOCR):
             # Try initializing fallback with CPU
             try:
                 logger.info("Trying to initialize PaddleOCR default (CPU-only)...")
-                return PaddleOCR(use_gpu=False, show_log=False)
+                return PaddleOCR(use_gpu=False, use_angle_cls=False, show_log=False)
             except Exception as e2:
                 logger.error("Failed to initialize PaddleOCR: %s - %s", type(e2).__name__, e2)
                 return None
