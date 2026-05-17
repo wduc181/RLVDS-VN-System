@@ -46,27 +46,80 @@ class Database:
         self.conn = None
 
     def migrate_schema(self) -> None:
-        """Drop UNIQUE constraint on plate_text for existing databases.
+        """Remove UNIQUE constraint on plate_text for existing databases.
 
-        SQLite auto-creates an index ``sqlite_autoindex_violations_N``
-        for UNIQUE columns. Dropping it removes the uniqueness constraint
-        so the same plate can be recorded for multiple violations.
+        SQLite does not support ALTER TABLE DROP CONSTRAINT, so we
+        rebuild the table without the UNIQUE clause and copy all rows.
         """
         self._ensure_connected()
         assert self.conn is not None
+
         cur = self.conn.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='index' AND tbl_name='violations' "
-            "AND name LIKE 'sqlite_autoindex_violations_%';"
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='violations';"
         )
-        rows = cur.fetchall()
-        for (idx_name,) in rows:
-            try:
-                self.conn.execute(f"DROP INDEX IF EXISTS \"{idx_name}\";")
-                logger.info("Migration: dropped unique constraint %s", idx_name)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Migration: could not drop %s: %s", idx_name, exc)
+        row = cur.fetchone()
+        if row is None:
+            return
+
+        create_sql = row[0]
+        if "plate_text TEXT NOT NULL UNIQUE" not in create_sql:
+            return  # already migrated or never had the constraint
+
+        logger.info("Migration: rebuilding violations table to drop UNIQUE constraint")
+
+        self.conn.execute("""
+            CREATE TABLE violations_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                plate_text TEXT NOT NULL,
+                violation_time TEXT NOT NULL,
+                light_state TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'VIOLATION',
+                full_image_path TEXT,
+                plate_image_path TEXT,
+                confidence REAL NOT NULL DEFAULT 0.0,
+                zone_id TEXT NOT NULL DEFAULT 'default',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        self.conn.execute("""
+            INSERT INTO violations_new
+            SELECT id, plate_text, violation_time, light_state, status,
+                   full_image_path, plate_image_path, confidence, zone_id,
+                   created_at, updated_at
+            FROM violations;
+        """)
+        self.conn.execute("DROP TABLE violations;")
+        self.conn.execute("ALTER TABLE violations_new RENAME TO violations;")
+
+        # Recreate indexes and trigger
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_violations_plate_text ON violations(plate_text);"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_violations_time ON violations(violation_time);"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_violations_light_state ON violations(light_state);"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_violations_status ON violations(status);"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_violations_zone ON violations(zone_id);"
+        )
+        self.conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS trg_violations_updated_at
+            AFTER UPDATE ON violations
+            FOR EACH ROW
+            BEGIN
+                UPDATE violations
+                SET updated_at = CURRENT_TIMESTAMP
+                WHERE id = OLD.id;
+            END;
+        """)
         self.conn.commit()
+        logger.info("Migration: UNIQUE constraint removed from plate_text")
 
     def create_tables(self) -> None:
         self._ensure_connected()

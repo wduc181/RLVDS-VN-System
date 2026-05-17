@@ -94,12 +94,18 @@ class Pipeline:
         violation_count = 0
 
         try:
-            for frame in self.video_source:  # type: ignore[union-attr]
+            target_fps = self._cfg.video.fps
+            frame_iter = (
+                self.video_source.iter_frames_throttled(float(target_fps))
+                if target_fps > 0
+                else self.video_source
+            )
+            for frame in frame_iter:  # type: ignore[union-attr]
                 if not self._running:
                     break
 
                 now = time.perf_counter()
-                fps = int(1 / (now - prev_time)) if now != prev_time else 0
+                fps = round(1 / (now - prev_time), 1) if now != prev_time else 0.0
                 prev_time = now
 
                 light_state = self.traffic_light.get_state().value

@@ -160,6 +160,106 @@ class VideoSource(BaseVideoSource):
             return False, None
         return True, frame
 
+    def grab_frame(self) -> bool:
+        """Grab next frame header without decoding (fast, ~1ms).
+
+        Returns:
+            True if a frame was grabbed successfully.
+        """
+        if not self.is_opened():
+            return False
+        return self.cap.grab()
+
+    def retrieve_frame(self) -> tuple[bool, Optional[np.ndarray]]:
+        """Decode and return the last grabbed frame.
+
+        Returns:
+            (success, frame) tuple.
+        """
+        if not self.is_opened():
+            return False, None
+        ok, frame = self.cap.retrieve()
+        if not ok:
+            return False, None
+        return True, frame
+
+    def iter_frames_throttled(self, target_fps: float) -> Iterator[np.ndarray]:
+        """Yield frames at target FPS, skipping intermediate frames with grab().
+
+        Uses ``cap.grab()`` for skipped frames (fast, no decode) and
+        ``cap.read()`` only for frames that need processing. This avoids
+        the decode cost on frames you discard.
+
+        Args:
+            target_fps: Target processing frame rate. Frames between
+                        intervals are skipped via grab(). 0 = no limit.
+
+        Yields:
+            Frames at approximately the target rate.
+        """
+        if target_fps <= 0:
+            yield from self.iter_frames()
+            return
+
+        frame_interval = 1.0 / target_fps
+        last_yield = time.perf_counter()
+        failures = 0
+        reconnect_attempts = 0
+
+        while True:
+            if not self.is_opened():
+                break
+
+            now = time.perf_counter()
+
+            if now - last_yield >= frame_interval:
+                # Process this frame — full read + decode
+                ok, frame = self.read_frame()
+                if ok and frame is not None:
+                    last_yield = time.perf_counter()
+                    failures = 0
+                    reconnect_attempts = 0
+                    yield frame
+                    continue
+
+                failures += 1
+                if not self._is_stream:
+                    break
+                if failures >= self._max_read_failures:
+                    reconnect_attempts += 1
+                    if reconnect_attempts > self._max_reconnect_attempts:
+                        logger.error(
+                            "Stream permanently lost for source %r after %d reconnect attempts",
+                            self.source,
+                            reconnect_attempts - 1,
+                        )
+                        break
+                    self._safe_reopen()
+                    if not self.is_opened():
+                        break
+                    failures = 0
+            else:
+                # Skip — grab header only (fast, no decode)
+                if not self.cap.grab():
+                    failures += 1
+                    if not self._is_stream:
+                        break
+                    if failures >= self._max_read_failures:
+                        reconnect_attempts += 1
+                        if reconnect_attempts > self._max_reconnect_attempts:
+                            logger.error(
+                                "Stream permanently lost for source %r after %d reconnect attempts",
+                                self.source,
+                                reconnect_attempts - 1,
+                            )
+                            break
+                        self._safe_reopen()
+                        if not self.is_opened():
+                            break
+                        failures = 0
+                else:
+                    failures = 0
+
     @override
     def is_opened(self) -> bool:
         """Return True if capture handle is opened."""

@@ -312,6 +312,18 @@ def main() -> None:
     prev_time = time.perf_counter()
 
     while st.session_state.get("running", False):
+        now = time.perf_counter()
+
+        if now - prev_time < frame_interval:
+            # Skip — grab header only (fast, ~1ms, no decode)
+            if not src.grab_frame():
+                frame_idx = st.session_state.get("frame_idx", 0)
+                _cleanup_video_source()
+                st.session_state["running"] = False
+                video_placeholder.success(f"Completed - processed {frame_idx} frames.")
+                break
+            continue
+
         ok, frame = src.read_frame()
         if not ok or frame is None:
             frame_idx = st.session_state.get("frame_idx", 0)
@@ -319,17 +331,17 @@ def main() -> None:
             st.session_state["running"] = False
             video_placeholder.success(f"Completed - processed {frame_idx} frames.")
             break
+
+        dt = now - prev_time
+        fps = round(1 / dt, 1) if dt > 0 else 0.0
+        prev_time = now
+
         # Only copy the frame when detection is active (raw_frame needed for clean crop).
         if show_detection:
             raw_frame = frame.copy()
         else:
             # When both are disabled, avoid the copy and just reference the current frame.
             raw_frame = frame
-
-        now = time.perf_counter()
-        dt = now - prev_time
-        fps = int(1 / dt) if dt > 0 else 0
-        prev_time = now
 
         frame_idx = st.session_state.get("frame_idx", 0) + 1
         st.session_state["frame_idx"] = frame_idx

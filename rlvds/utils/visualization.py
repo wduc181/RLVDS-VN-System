@@ -101,18 +101,18 @@ def draw_bbox(
     return frame
 
 
-def draw_fps(frame: np.ndarray, fps: int) -> np.ndarray:
+def draw_fps(frame: np.ndarray, fps: float) -> np.ndarray:
     """Vẽ chỉ số FPS lên góc trên bên trái frame.
 
     Args:
         frame: Frame ảnh gốc.
-        fps: Giá trị FPS hiện tại.
+        fps: Giá trị FPS hiện tại (float, hiển thị 1 chữ số thập phân).
 
     Returns:
         Frame đã vẽ.
     """
     cv2.putText(
-        frame, str(fps), (7, 70),
+        frame, f"{fps:.1f}", (7, 70),
         cv2.FONT_HERSHEY_SIMPLEX, 3, (100, 255, 0), 3, cv2.LINE_AA,
     )
     return frame
