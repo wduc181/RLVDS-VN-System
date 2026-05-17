@@ -30,6 +30,7 @@ class ViolationDetector:
         self._violations_dir = Path(violations_dir)
         self._zone_id = zone_id
         self._recorded_plates: Set[str] = set()
+        self._prev_light_state: Optional[LightState] = None
 
     def check_frame(self, detections: List[Detection]) -> List[Detection]:
         """Mark detections as violations when red light and anchor in zone."""
@@ -54,9 +55,19 @@ class ViolationDetector:
         """Mock check used in week-3 mini pipeline.
 
         Condition: plate appears inside polygon while traffic light is RED.
+        Recorded plates are cleared when light cycles to GREEN so the same
+        plate can violate again in future red-light cycles.
         """
         if not plate_text or plate_text == "unknown":
             return False
+
+        current_state = self._traffic_light.get_state()
+        if current_state != self._prev_light_state:
+            if current_state == LightState.GREEN:
+                self._recorded_plates.clear()
+                logger.debug("Recorded plates cleared on GREEN light")
+            self._prev_light_state = current_state
+
         if not self._traffic_light.is_red():
             return False
 

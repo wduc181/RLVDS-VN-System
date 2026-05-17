@@ -45,13 +45,36 @@ class Database:
         self.conn.close()
         self.conn = None
 
+    def migrate_schema(self) -> None:
+        """Drop UNIQUE constraint on plate_text for existing databases.
+
+        SQLite auto-creates an index ``sqlite_autoindex_violations_N``
+        for UNIQUE columns. Dropping it removes the uniqueness constraint
+        so the same plate can be recorded for multiple violations.
+        """
+        self._ensure_connected()
+        assert self.conn is not None
+        cur = self.conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='index' AND tbl_name='violations' "
+            "AND name LIKE 'sqlite_autoindex_violations_%';"
+        )
+        rows = cur.fetchall()
+        for (idx_name,) in rows:
+            try:
+                self.conn.execute(f"DROP INDEX IF EXISTS \"{idx_name}\";")
+                logger.info("Migration: dropped unique constraint %s", idx_name)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Migration: could not drop %s: %s", idx_name, exc)
+        self.conn.commit()
+
     def create_tables(self) -> None:
         self._ensure_connected()
         self.execute(
             """
             CREATE TABLE IF NOT EXISTS violations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                plate_text TEXT NOT NULL UNIQUE,
+                plate_text TEXT NOT NULL,
                 violation_time TEXT NOT NULL,
                 light_state TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'VIOLATION',
@@ -63,6 +86,9 @@ class Database:
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             """
+        )
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_violations_plate_text ON violations(plate_text);"
         )
         self.execute(
             """

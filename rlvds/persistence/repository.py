@@ -13,7 +13,7 @@ import numpy as np
 
 from config.settings import get_settings
 from rlvds.core.base import BaseRepository, Detection, Violation
-from rlvds.ocr.postprocess import check_valid_plate
+from rlvds.ocr.postprocess import check_valid_plate, format_plate
 from rlvds.persistence.database import Database
 from rlvds.persistence.models import (
     DailyStat,
@@ -41,6 +41,7 @@ class ViolationRepository(BaseRepository):
         self._plate_dir.mkdir(parents=True, exist_ok=True)
         self._db.connect()
         self._db.create_tables()
+        self._db.migrate_schema()
 
     # ------------------------------------------------------------------
     # CRUD
@@ -57,8 +58,7 @@ class ViolationRepository(BaseRepository):
                 plate_text, violation_time, light_state, status,
                 full_image_path, plate_image_path, confidence, zone_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(plate_text) DO NOTHING;
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?);
             """,
             (
                 record.plate_text,
@@ -72,7 +72,7 @@ class ViolationRepository(BaseRepository):
             ),
         )
         if cur.rowcount == 0:
-            logger.debug("Skip duplicate violation for plate: %s", record.plate_text)
+            logger.warning("Insert affected 0 rows for plate: %s", record.plate_text)
             return None
         violation_id = int(cur.lastrowid)
         logger.info(
@@ -211,15 +211,15 @@ class ViolationRepository(BaseRepository):
         return row is not None
 
     def clean_data(self) -> int:
-        """Normalize plates, remove invalid records and deduplicate by plate."""
+        """Normalize plates, remove invalid records and deduplicate by (plate, time)."""
         rows = self._db.query_all(
             """
-            SELECT id, plate_text
+            SELECT id, plate_text, violation_time
             FROM violations
             ORDER BY id ASC;
             """
         )
-        seen: set[str] = set()
+        seen: set[tuple[str, str]] = set()
         ids_to_remove: list[int] = []
         updates: list[tuple[str, int]] = []
 
@@ -234,11 +234,13 @@ class ViolationRepository(BaseRepository):
                 ids_to_remove.append(int(row["id"]))
                 continue
 
-            if normalized in seen:
+            violation_time = str(row["violation_time"] or "")
+            dedup_key = (normalized, violation_time)
+            if dedup_key in seen:
                 ids_to_remove.append(int(row["id"]))
                 continue
 
-            seen.add(normalized)
+            seen.add(dedup_key)
             if normalized != raw_plate:
                 updates.append((normalized, int(row["id"])))
 
@@ -446,7 +448,7 @@ class ViolationRepository(BaseRepository):
         )
         violation_id = self.save(rec)
         if violation_id is None:
-            logger.debug("record_violation skipped duplicated plate: %s", plate_text)
+            logger.debug("record_violation skipped invalid plate: %s", plate_text)
             return None
 
         full_image_path: str | None = None
@@ -513,9 +515,9 @@ class ViolationRepository(BaseRepository):
         if not candidate:
             return None
 
-        # Delegate to OCR postprocessing helper which encapsulates plate rules.
-        normalized = check_valid_plate(candidate)
-        if not normalized:
+        # Delegate to OCR postprocessing helpers to validate and format.
+        normalized = format_plate(candidate)
+        if not normalized or not check_valid_plate(normalized):
             return None
         return normalized
     def _build_filters(

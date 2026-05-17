@@ -34,11 +34,8 @@ from rlvds.utils.visualization import (
     draw_zone_overlay,
     set_hd_resolution,
 )
-from rlvds.core.mini_pipeline import MiniPipeline
 from rlvds.core.cached_pipeline import CachedPipeline
 from rlvds.ocr.plate_cache import PlateTrackCache
-from rlvds.detection import LicensePlateDetector
-from rlvds.ocr.recognizer import LicensePlateOCR
 
 logger = get_logger(__name__)
 
@@ -77,22 +74,12 @@ def _cleanup_video_source() -> None:
         "frame_buffer",
         "violation_count",
         "mini_pipeline",
+        "cached_pipeline",
         "detection_available",
         "violation_repo",
         "plate_preprocessor",
     ):
         st.session_state.pop(key, None)
-    st.session_state.pop("frame_idx", None)
-    st.session_state.pop("total_frames", None)
-    st.session_state.pop("resolution", None)
-    st.session_state.pop("traffic_light", None)
-    st.session_state.pop("zone", None)
-    st.session_state.pop("violation_detector", None)
-    st.session_state.pop("frame_buffer", None)
-    st.session_state.pop("violation_count", None)
-    st.session_state.pop("mini_pipeline", None)
-    st.session_state.pop("cached_pipeline", None)
-    st.session_state.pop("detection_available", None)
 
 
 def _build_runtime_components() -> tuple[ViolationZone, TrafficLightFSM, ViolationDetector, FrameBuffer]:
@@ -332,8 +319,8 @@ def main() -> None:
             st.session_state["running"] = False
             video_placeholder.success(f"Completed - processed {frame_idx} frames.")
             break
-        # Only perform an expensive full-frame copy when detection or persistence is enabled.
-        if st.session_state.get("enable_detection", False) or st.session_state.get("enable_persistence", False):
+        # Only copy the frame when detection is active (raw_frame needed for clean crop).
+        if show_detection:
             raw_frame = frame.copy()
         else:
             # When both are disabled, avoid the copy and just reference the current frame.
@@ -415,8 +402,8 @@ def main() -> None:
 
         try:
             video_placeholder.image(display_frame, channels="RGB")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to render frame %d: %s", frame_idx, exc)
         fps_display.metric("FPS", fps)
         frame_count_display.metric("Frame", f"{frame_idx}/{total_frames}")
         light_state_display.metric("Light State", light_state)
@@ -427,7 +414,7 @@ def main() -> None:
         )
 
         elapsed = time.perf_counter() - now
-        sleep_time = frame_interval - elapsed
+        sleep_time = max(0.0, frame_interval - elapsed)
         if sleep_time > 0:
             time.sleep(sleep_time)
 

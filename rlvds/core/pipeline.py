@@ -1,130 +1,232 @@
-"""
-RLVDS Processing Pipeline
-==========================
+"""RLVDS Processing Pipeline — full orchestration of detection, OCR, and violation logic."""
 
-Mục đích:
-    Orchestrate toàn bộ luồng xử lý — kết nối tất cả modules thành
-    pipeline hoàn chỉnh giống camera.py nhưng dạng modular.
+from __future__ import annotations
 
-Tham chiếu sample code:
-    - .github/sample/camera.py (TOÀN BỘ FILE) — đây là pipeline gốc
-    - Mỗi phần trong camera.py đã được tách sang module tương ứng
+import time
+from pathlib import Path
+from typing import List, Optional
 
-Luồng xử lý (tương ứng camera.py):
-    1. Setup     (camera.py L18-41)     → __init__: load model, config, zone, timer
-    2. Read      (camera.py L49-51)     → ingestion/video_source.py
-    3. Check     (camera.py L53)        → temporal/traffic_light.py
-    4. Mask      (camera.py L56-59)     → spatial/polygon.py + zones.py
-    5. Detect    (camera.py L60-68)     → detection/detector.py
-    6. Crop      (camera.py L69)        → detection/detector.py::crop_plate
-    7. Preprocess (camera.py L71)       → ocr/postprocess.py
-    8. OCR       (camera.py L74)        → ocr/recognizer.py
-    9. Draw      (camera.py L70,77)     → utils/visualization.py
-    10. Save     (camera.py L81-88)     → persistence/repository.py
-    11. Display  (camera.py L117-124)   → cv2.imshow
-    12. Clean    (camera.py L110-113)   → persistence/repository.py::clean_data
+import cv2
+import numpy as np
 
-===========================================================================
-Class cần implement:
-===========================================================================
+from config.settings import Settings, get_settings
+from rlvds.core.cached_pipeline import CachedPipeline
+from rlvds.core.mini_pipeline import MiniPipeline
+from rlvds.detection.detector import LicensePlateDetector
+from rlvds.ingestion.video_source import VideoSource
+from rlvds.ocr.plate_cache import PlateTrackCache
+from rlvds.ocr.preprocessor import PlatePreprocessor
+from rlvds.ocr.recognizer import LicensePlateOCR
+from rlvds.persistence.database import Database
+from rlvds.persistence.repository import ViolationRepository
+from rlvds.spatial.zones import ViolationZone
+from rlvds.temporal.traffic_light import TrafficLightFSM
+from rlvds.temporal.violation import ViolationDetector
+from rlvds.utils.logger import get_logger
+from rlvds.utils.visualization import (
+    draw_detections,
+    draw_fps,
+    draw_light_status,
+    draw_zone_overlay,
+)
 
-1. Pipeline
-   - __init__(config: Settings)
-     + Khởi tạo TẤT CẢ components:
-       self.video_source = None  # set khi run()
-       self.detector = LicensePlateDetector(config.detection.model_path,
-                                            config.detection.device)
-       self.ocr = LicensePlateOCR(lang=config.ocr.lang,
-                                   use_gpu=config.ocr.use_gpu)
-       self.zone = ViolationZone(config.spatial.violation_zone)
-       self.traffic_light = TrafficLightFSM(
-           red_sec=config.temporal.red_duration_sec,
-           green_sec=config.temporal.green_duration_sec,
-           yellow_sec=config.temporal.yellow_duration_sec
-       )
-       self.violation_detector = ViolationDetector(self.zone, self.traffic_light)
-       self.db = Database(config.database.url)
-       self.repo = ViolationRepository(self.db)
-       self.config = config
+logger = get_logger(__name__)
 
-   - run(video_source: str) -> None
-     Main loop — tương ứng camera.py dòng 45-127:
 
-     ```
-     self.video_source = VideoSource(video_source)
-     self.traffic_light.start()
-     self.db.connect()
-     self.db.create_tables()
+class Pipeline:
+    """Full RLVDS pipeline orchestrating all components.
 
-     prev_frame_time = 0
-     for frame in self.video_source:
-         # --- FPS calculation (camera.py L117-121) ---
-         new_frame_time = time.time()
-         fps = int(1 / (new_frame_time - prev_frame_time)) if (new_frame_time != prev_frame_time) else 0
-         prev_frame_time = new_frame_time
+    Args:
+        settings: Application settings. Loaded from config if not provided.
+    """
 
-         # --- Check light state (camera.py L53) ---
-         if self.traffic_light.is_red():
-             # ĐÈN ĐỎ → detect violations
-             masked = self.zone.apply_mask(frame)
-             self.zone.draw(frame)
-             detections = self.detector.detect(masked)
+    def __init__(self, settings: Optional[Settings] = None) -> None:
+        self._cfg = settings or get_settings()
 
-             for det in detections:
-                 # Crop + preprocess + OCR (camera.py L69-76)
-                 crop_img = self.detector.crop_plate(det, frame, expand_ratio=0.15)
-                 processed = preprocess_image(crop_img)
-                 plate_text = self.ocr.recognize(processed)
+        self.detector = LicensePlateDetector(
+            model_path=self._cfg.detection.model_path,
+            confidence_threshold=self._cfg.detection.confidence_threshold,
+            iou_threshold=self._cfg.detection.iou_threshold,
+            image_size=self._cfg.detection.image_size,
+            device=self._cfg.detection.device,
+        )
+        self.ocr = LicensePlateOCR(
+            lang=self._cfg.ocr.lang,
+            use_gpu=self._cfg.ocr.use_gpu,
+            confidence_threshold=self._cfg.ocr.confidence_threshold,
+        )
+        self.zone = ViolationZone(
+            vertices=self._cfg.spatial.violation_zone,
+            zone_id="default",
+            color=self._cfg.spatial.zone_color,
+            thickness=self._cfg.spatial.zone_thickness,
+        )
+        self.traffic_light = TrafficLightFSM(
+            red_sec=self._cfg.temporal.red_duration_sec,
+            green_sec=self._cfg.temporal.green_duration_sec,
+            yellow_sec=self._cfg.temporal.yellow_duration_sec,
+            initial_state=self._cfg.temporal.initial_state,
+        )
+        self.violation_detector = ViolationDetector(
+            zone=self.zone,
+            traffic_light=self.traffic_light,
+            violations_dir=self._cfg.paths.violations_dir,
+            zone_id=self.zone.zone_id,
+        )
+        self.video_source: Optional[VideoSource] = None
+        self.db: Optional[Database] = None
+        self.repo: Optional[ViolationRepository] = None
+        self._running = False
 
-                 if plate_text != "unknown":
-                     # Draw (camera.py L77)
-                     draw_text(frame, plate_text, (det.bbox[0], det.bbox[1]))
-                     draw_bbox(frame, det.bbox)
+        logger.info("Pipeline initialized (device=%s)", self._cfg.detection.device)
 
-                     # Save violation (camera.py L81-88)
-                     violation = self.violation_detector.process_violation(
-                         det, frame, plate_text)
-                     image_path = self.repo.save_violation_image(frame, ...)
-                     self.repo.save(violation)
-         else:
-             # ĐÈN XANH → clean data (camera.py L110-113)
-             self.repo.clean_data()
+    def run(self, source: str | int, *, display: bool = True) -> None:
+        """Run the pipeline on a video source.
 
-         # --- Display (camera.py L122-124) ---
-         draw_fps(frame, fps)
-         cv2.imshow('RLVDS-VN', set_hd_resolution(frame))
-         if cv2.waitKey(1) & 0xFF == ord('q'):
-             break
+        Args:
+            source: Video file path or camera index.
+            display: Show OpenCV window output.
+        """
+        self._start(source)
+        self._running = True
 
-     self.stop()
-     ```
+        prev_time = time.perf_counter()
+        violation_count = 0
 
-   - process_frame(frame: np.ndarray) -> list[Violation]
-     + Xử lý 1 frame riêng lẻ (cho batch processing hoặc testing)
+        try:
+            for frame in self.video_source:  # type: ignore[union-attr]
+                if not self._running:
+                    break
 
-   - stop() -> None
-     + Cleanup:
-       self.video_source.release()
-       self.db.disconnect()
-       cv2.destroyAllWindows()
+                now = time.perf_counter()
+                fps = int(1 / (now - prev_time)) if now != prev_time else 0
+                prev_time = now
 
-Dependencies inject qua __init__:
-    config: Settings       → từ config/settings.py::get_settings()
-    detector               → detection/detector.py
-    ocr                    → ocr/recognizer.py
-    zone                   → spatial/zones.py
-    traffic_light          → temporal/traffic_light.py
-    violation_detector     → temporal/violation.py
-    db + repo              → persistence/database.py + repository.py
+                light_state = self.traffic_light.get_state().value
 
-TODO:
-    [ ] Import tất cả modules cần thiết
-    [ ] Implement class Pipeline
-    [ ] Implement __init__ — khởi tạo components từ config
-    [ ] Implement run() — main loop tương ứng camera.py
-    [ ] Implement process_frame() — xử lý 1 frame
-    [ ] Implement stop() — cleanup resources
-    [ ] Handle Ctrl+C gracefully (try/except KeyboardInterrupt)
-    [ ] Add logging tại mỗi stage (dùng get_logger từ utils/logger.py)
-    [ ] Test: chạy pipeline với video → xem output display
-"""
+                draw_zone_overlay(
+                    frame,
+                    self.zone.polygon,
+                    color=self._cfg.spatial.zone_color,
+                    alpha=0.25,
+                    thickness=self._cfg.spatial.zone_thickness,
+                )
+
+                detection_results = self._process_detections(frame)
+
+                saved = self._persist_violations(frame, detection_results, light_state)
+                violation_count += saved
+
+                draw_light_status(frame, light_state)
+                draw_fps(frame, fps)
+                draw_detections(frame, detection_results)
+
+                if display:
+                    display_frame = cv2.resize(frame, (1280, 720))
+                    cv2.imshow("RLVDS-VN", display_frame)
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        break
+
+        except KeyboardInterrupt:
+            logger.info("Pipeline interrupted by user")
+        finally:
+            self.stop()
+
+    def process_frame(self, frame: np.ndarray) -> List:
+        """Process a single frame through detection and violation check."""
+        return self._process_detections(frame)
+
+    def stop(self) -> None:
+        """Release all resources."""
+        self._running = False
+        if self.video_source is not None:
+            self.video_source.release()
+            self.video_source = None
+        if self.db is not None:
+            self.db.disconnect()
+            self.db = None
+        cv2.destroyAllWindows()
+        logger.info("Pipeline stopped")
+
+    def _start(self, source: str | int) -> None:
+        self.video_source = VideoSource(source)
+        self.traffic_light.start()
+
+        self.db = Database(self._cfg.database.url)
+        self.db.connect()
+        self.db.create_tables()
+        self.db.migrate_schema()
+
+        self.repo = ViolationRepository(
+            database=self.db,
+            violations_dir=self._cfg.paths.violations_dir,
+        )
+
+        # Build cached or mini pipeline
+        preprocessor = PlatePreprocessor(self._cfg.preprocessing)
+        if self._cfg.ocr_cache.enabled:
+            cache = PlateTrackCache(
+                iou_threshold=self._cfg.ocr_cache.iou_threshold,
+                max_size=self._cfg.ocr_cache.max_cache_size,
+                ttl_frames=self._cfg.ocr_cache.cache_ttl_frames,
+            )
+            self._pipeline = CachedPipeline(
+                detector=self.detector,
+                ocr=self.ocr,
+                violation_detector=self.violation_detector,
+                cache=cache,
+                crop_expand_ratio=self._cfg.preprocessing.expand_ratio,
+                ocr_quality_frames=self._cfg.ocr_cache.ocr_quality_frames,
+            )
+        else:
+            self._pipeline = MiniPipeline(
+                detector=self.detector,
+                ocr=self.ocr,
+                violation_detector=self.violation_detector,
+                crop_expand_ratio=self._cfg.preprocessing.expand_ratio,
+            )
+
+        self._preprocessor = preprocessor
+        logger.info("Pipeline started — source=%s", source)
+
+    def _process_detections(self, frame: np.ndarray) -> List:
+        if not self.detector.is_available():
+            return []
+        try:
+            return self._pipeline.process_frame(frame)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Detection failed: %s", exc)
+            return []
+
+    def _persist_violations(
+        self,
+        frame: np.ndarray,
+        results: List,
+        light_state: str,
+    ) -> int:
+        if self.repo is None or not results:
+            return 0
+        saved = 0
+        for result in results:
+            if not result.is_violation or result.plate_text == "unknown":
+                continue
+            det = result.detection
+            crop = det.crop(frame)
+            processed_plate = None
+            if hasattr(self, "_preprocessor") and crop.size > 0:
+                processed = self._preprocessor.run_pipeline(crop)
+                if processed.size > 0:
+                    processed_plate = processed
+            inserted_id = self.repo.record_violation(
+                frame=frame,
+                detection=det,
+                plate_text=result.plate_text,
+                light_state=light_state,
+                preprocessed_plate=processed_plate,
+                polygon=self.zone.polygon,
+                zone_id=self.zone.zone_id,
+                confidence=det.confidence,
+            )
+            if inserted_id is not None:
+                saved += 1
+        return saved

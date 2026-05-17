@@ -44,6 +44,7 @@ import numpy as np
 
 from config.settings import PreprocessingConfig
 from rlvds.core.base import Detection
+from rlvds.ocr.postprocess import to_gray
 from rlvds.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -300,19 +301,9 @@ class PlatePreprocessor:
         return self.run_pipeline(cropped)
 
     # ------------------------------------------------------------------
-    # Private helpers
+    # Helpers
     # ------------------------------------------------------------------
 
     @staticmethod
     def _to_gray(image: np.ndarray) -> np.ndarray:
-        """Chuyển ảnh BGR sang grayscale; bỏ qua nếu đã là grayscale.
-
-        Args:
-            image: Ảnh ``(H, W)`` hoặc ``(H, W, C)``.
-
-        Returns:
-            Ảnh grayscale ``(H, W)``.
-        """
-        if len(image.shape) == 2:
-            return image
-        return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        return to_gray(image)

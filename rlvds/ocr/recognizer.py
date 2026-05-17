@@ -86,6 +86,11 @@ class LicensePlateOCR(BaseOCR):
         # HARDCODE use_gpu=False để tránh xung đột cuDNN
         # PyTorch (CUDA 12.4) kéo cuDNN 9.x, PaddlePaddle 2.6.2 chỉ tương thích cuDNN 8.x
         # OCR xử lý ảnh biển số nhỏ (~150x50px) nên CPU đủ nhanh, không cần GPU
+        if self._use_gpu:
+            logger.warning(
+                "OCR use_gpu=True in config is overridden — PaddleOCR forced to CPU "
+                "to avoid cuDNN 8.x/9.x conflict with PyTorch CUDA 12.4"
+            )
         try:
             logger.info("Initializing PaddleOCR with lang='%s', use_gpu=False (CPU-only)...", self._lang)
             return PaddleOCR(
@@ -123,7 +128,7 @@ class LicensePlateOCR(BaseOCR):
             text = str(payload[0]).strip()
             score = float(payload[1])
             if score < self._confidence_threshold:
-                return None
+                continue
             normalized = clean_plate_text(text)
             if normalized:
                 texts.append(normalized)

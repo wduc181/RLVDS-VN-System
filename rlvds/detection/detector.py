@@ -7,7 +7,6 @@ YOLOv5-based license plate detection for Vietnamese plates.
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import List
 
@@ -15,7 +14,9 @@ import numpy as np
 
 from rlvds.core.base import BaseDetector, Detection
 
-logger = logging.getLogger(__name__)
+from rlvds.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class LicensePlateDetector(BaseDetector):
@@ -74,7 +75,7 @@ class LicensePlateDetector(BaseDetector):
                 "custom",
                 path=path,
                 force_reload=False,
-                trust_repo=True,
+                trust_repo=True,  # security: arbitrary code from upstream — pin commit hash in production
             )
 
             # Configure model

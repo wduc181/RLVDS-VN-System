@@ -25,7 +25,7 @@ def denoise_image(image: np.ndarray) -> np.ndarray:
     """Denoise image using NLM on grayscale image."""
     if image.size == 0:
         return image
-    gray = _to_gray(image)
+    gray = to_gray(image)
     return cv2.fastNlMeansDenoising(gray, None, 30, 7, 21)
 
 
@@ -33,7 +33,7 @@ def adjust_contrast(image: np.ndarray) -> np.ndarray:
     """Apply CLAHE to improve local contrast for OCR."""
     if image.size == 0:
         return image
-    gray = _to_gray(image)
+    gray = to_gray(image)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     return clahe.apply(gray)
 
@@ -148,10 +148,15 @@ def check_valid_plate(plate: str) -> bool:
     return True
 
 
-def _to_gray(image: np.ndarray) -> np.ndarray:
+def to_gray(image: np.ndarray) -> np.ndarray:
+    """Convert BGR image to grayscale; pass through if already single-channel."""
     if len(image.shape) == 2:
         return image
     return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+
+# Keep alias for external callers that used the private name
+_to_gray = to_gray
 
 
 def _to_digit(char: str) -> str:

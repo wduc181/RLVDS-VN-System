@@ -38,7 +38,7 @@ def test_database_supports_sqlite_memory() -> None:
     db.disconnect()
 
 
-def test_crud_and_dedup_by_plate(tmp_path: Path) -> None:
+def test_crud_and_multiple_saves(tmp_path: Path) -> None:
     repo = _build_repo(tmp_path)
     record = ViolationRecord(
         plate_text="30A-12345",
@@ -52,8 +52,8 @@ def test_crud_and_dedup_by_plate(tmp_path: Path) -> None:
     second_id = repo.save(record)
 
     assert first_id is not None
-    assert second_id is None
-    assert repo.count() == 1
+    assert second_id is not None  # same plate can have multiple violations
+    assert repo.count() == 2
 
     stored = repo.get_by_id(first_id)
     assert stored is not None
@@ -66,7 +66,7 @@ def test_crud_and_dedup_by_plate(tmp_path: Path) -> None:
 
     deleted = repo.delete(first_id)
     assert deleted is True
-    assert repo.count() == 0
+    assert repo.count() == 1  # second record still exists
 
 
 def test_record_violation_saves_both_images_and_paths(tmp_path: Path) -> None:
@@ -99,10 +99,8 @@ def test_record_violation_saves_both_images_and_paths(tmp_path: Path) -> None:
     assert Path(stored.plate_image_path).exists()
     assert stored.light_state == "RED"
     assert stored.zone_id == "cam01"
-    scene_files_before = list((tmp_path / "violations" / "scene").glob("*"))
-    plate_files_before = list((tmp_path / "violations" / "plate").glob("*"))
 
-    # dedup check: same plate should not insert again
+    # same plate can violate again — should create a second record
     second = repo.record_violation(
         frame=frame,
         detection=det,
@@ -110,12 +108,8 @@ def test_record_violation_saves_both_images_and_paths(tmp_path: Path) -> None:
         light_state="RED",
         preprocessed_plate=preprocessed_plate,
     )
-    assert second is None
-    assert repo.count() == 1
-    scene_files_after = list((tmp_path / "violations" / "scene").glob("*"))
-    plate_files_after = list((tmp_path / "violations" / "plate").glob("*"))
-    assert len(scene_files_after) == len(scene_files_before)
-    assert len(plate_files_after) == len(plate_files_before)
+    assert second is not None
+    assert repo.count() == 2
 
 
 def test_delete_does_not_remove_files_outside_violations_dir(tmp_path: Path) -> None:
@@ -281,10 +275,9 @@ def test_clean_data_removes_invalid_and_normalized_duplicates(tmp_path: Path) ->
     )
 
     removed = repo.clean_data()
-    assert removed == 2
-    assert repo.count() == 1
-    remaining = repo.get_all()
-    assert remaining[0].plate_text == "30A-12345"
+    # Only INVALID plate removed; the two 30A entries have different violation_times
+    assert removed == 1
+    assert repo.count() == 2
 
 
 def test_export_csv_with_filters_returns_written_rows(tmp_path: Path) -> None:
@@ -318,7 +311,7 @@ def test_export_csv_with_filters_returns_written_rows(tmp_path: Path) -> None:
     assert "30A-22345" in content[1]
 
 
-def test_save_returns_none_when_insert_conflict_rowcount_zero(tmp_path: Path, monkeypatch) -> None:
+def test_save_returns_none_when_rowcount_zero(tmp_path: Path, monkeypatch) -> None:
     repo = _build_repo(tmp_path)
     rec = ViolationRecord(
         plate_text="30A-32345",
