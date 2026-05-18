@@ -6,76 +6,265 @@ Mục đích:
     Vẽ bounding boxes, text, polygon zones, và annotations lên frame
     để hiển thị kết quả detection/violation trên video output.
 
-Tham chiếu sample code:
-    - .github/sample/utils/helper.py::draw_text (dòng 20-26)
-    - .github/sample/utils/helper.py::set_hd_resolution (dòng 9-18)
-    - .github/sample/camera.py (dòng 59, 70, 77, 122, 124) — drawing calls
-
 Thư viện sử dụng:
     - opencv-python (cv2): Drawing functions
-
-===========================================================================
-Hàm cần implement:
-===========================================================================
-
-1. draw_text(img: np.ndarray, text: str, pos: tuple = (0, 0),
-             font=cv2.FONT_HERSHEY_SIMPLEX, font_scale: float = 1,
-             font_thickness: int = 2, text_color: tuple = (255,255,255)) -> None
-   
-   Từ helper.py dòng 20-26:
-     cv2.putText(img, text, pos, font, font_scale, text_color, font_thickness, cv2.LINE_AA)
-   
-   Dùng cho: hiển thị biển số đọc được lên frame (camera.py dòng 77)
-
-2. set_hd_resolution(image: np.ndarray, width: int = 1280) -> np.ndarray
-   
-   Từ helper.py dòng 9-18:
-     height, width_orig, _ = image.shape
-     ratio = height / width_orig
-     image = cv2.resize(image, (width, int(width * ratio)))
-     return image
-   
-   Dùng cho: resize frame khi hiển thị (camera.py dòng 124)
-
-3. draw_bbox(frame: np.ndarray, bbox: tuple, color: tuple = (0,0,225),
-             thickness: int = 1, label: str = None) -> np.ndarray
-   
-   Từ camera.py dòng 70:
-     cv2.rectangle(frame, (x1,y1), (x2,y2), color=color, thickness=thickness)
-   
-   Nếu có label:
-     cv2.putText(frame, label, (x1, y1-10), ...)
-
-4. draw_fps(frame: np.ndarray, fps: int) -> np.ndarray
-   
-   Từ camera.py dòng 122:
-     cv2.putText(frame, str(fps), (7, 70), cv2.FONT_HERSHEY_SIMPLEX, 3,
-                 (100, 255, 0), 3, cv2.LINE_AA)
-
-5. draw_light_status(frame: np.ndarray, state: str,
-                     position: tuple = (50, 150)) -> np.ndarray
-   Vẽ trạng thái đèn (RED/GREEN/YELLOW) lên frame:
-     color_map = {"RED": (0,0,255), "GREEN": (0,255,0), "YELLOW": (0,255,255)}
-     cv2.circle(frame, position, 30, color_map[state], -1)  # filled circle
-     cv2.putText(frame, state, (position[0]+40, position[1]+10), ...)
-
-6. draw_violation_alert(frame: np.ndarray, text: str = "VIOLATION",
-                        color: tuple = (0, 0, 255)) -> np.ndarray
-   Vẽ cảnh báo vi phạm dạng nổi bật lên frame
-
-Color Scheme (BGR — OpenCV dùng BGR, không phải RGB):
-    - RED:    (0, 0, 255) — Violation/Alert
-    - GREEN:  (0, 255, 0) — Safe/Normal, text biển số
-    - YELLOW: (0, 255, 255) — Warning, polygon zone
-    - BLUE:   (255, 0, 0) — Detection bbox
-
-TODO:
-    [ ] Import cv2, numpy
-    [ ] Implement draw_text() — copy logic từ helper.py
-    [ ] Implement set_hd_resolution() — copy logic từ helper.py
-    [ ] Implement draw_bbox()
-    [ ] Implement draw_fps()
-    [ ] Implement draw_light_status()
-    [ ] Implement draw_violation_alert()
-    [ ] Test: tạo blank frame → vẽ bbox + text → verify ảnh output
 """
+
+from typing import Optional, Tuple
+
+import cv2
+import numpy as np
+
+
+# ---------------------------------------------------------------------------
+# Color Scheme (BGR — OpenCV dùng BGR, không phải RGB)
+# ---------------------------------------------------------------------------
+COLOR_RED: Tuple[int, int, int] = (0, 0, 255)
+COLOR_GREEN: Tuple[int, int, int] = (0, 255, 0)
+COLOR_YELLOW: Tuple[int, int, int] = (0, 255, 255)
+COLOR_BLUE: Tuple[int, int, int] = (255, 0, 0)
+
+_LIGHT_COLOR_MAP = {
+    "RED": COLOR_RED,
+    "GREEN": COLOR_GREEN,
+    "YELLOW": COLOR_YELLOW,
+}
+
+
+def draw_text(
+    img: np.ndarray,
+    text: str,
+    pos: Tuple[int, int] = (0, 0),
+    font: int = cv2.FONT_HERSHEY_SIMPLEX,
+    font_scale: float = 1,
+    font_thickness: int = 2,
+    text_color: Tuple[int, int, int] = (255, 255, 255),
+) -> None:
+    """Vẽ text lên frame (in-place).
+
+    Args:
+        img: Frame ảnh gốc sẽ bị thay đổi trực tiếp.
+        text: Chuỗi nội dung cần vẽ.
+        pos: Toạ độ ``(x, y)`` — góc trái dưới dòng text.
+        font: OpenCV font constant.
+        font_scale: Hệ số co giãn font.
+        font_thickness: Độ dày nét chữ.
+        text_color: Màu chữ BGR.
+    """
+    cv2.putText(
+        img, text, pos, font, font_scale,
+        text_color, font_thickness, cv2.LINE_AA,
+    )
+
+
+def set_hd_resolution(image: np.ndarray, width: int = 1280) -> np.ndarray:
+    """Resize ảnh giữ nguyên tỷ lệ theo chiều rộng mong muốn.
+
+    Args:
+        image: Frame ảnh gốc ``(H, W, C)``.
+        width: Chiều rộng đích (pixel).
+
+    Returns:
+        Ảnh đã resize.
+    """
+    height_orig, width_orig = image.shape[:2]
+    ratio = height_orig / width_orig
+    return cv2.resize(image, (width, int(width * ratio)))
+
+
+def draw_bbox(
+    frame: np.ndarray,
+    bbox: Tuple[int, int, int, int],
+    color: Tuple[int, int, int] = COLOR_BLUE,
+    thickness: int = 1,
+    label: Optional[str] = None,
+) -> np.ndarray:
+    """Vẽ bounding box lên frame, kèm label nếu có.
+
+    Args:
+        frame: Frame ảnh gốc.
+        bbox: ``(x1, y1, x2, y2)`` bounding box.
+        color: Màu viền BGR.
+        thickness: Độ dày viền.
+        label: Nhãn hiển thị phía trên bbox (tuỳ chọn).
+
+    Returns:
+        Frame đã vẽ.
+    """
+    x1, y1, x2, y2 = bbox
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color=color, thickness=thickness)
+    if label:
+        cv2.putText(
+            frame, label, (x1, y1 - 10),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA,
+        )
+    return frame
+
+
+def draw_fps(frame: np.ndarray, fps: float) -> np.ndarray:
+    """Vẽ chỉ số FPS lên góc trên bên trái frame.
+
+    Args:
+        frame: Frame ảnh gốc.
+        fps: Giá trị FPS hiện tại (float, hiển thị 1 chữ số thập phân).
+
+    Returns:
+        Frame đã vẽ.
+    """
+    cv2.putText(
+        frame, f"{fps:.1f}", (7, 70),
+        cv2.FONT_HERSHEY_SIMPLEX, 3, (100, 255, 0), 3, cv2.LINE_AA,
+    )
+    return frame
+
+
+def draw_light_status(
+    frame: np.ndarray,
+    state: str,
+    position: Tuple[int, int] = (50, 150),
+) -> np.ndarray:
+    """Vẽ trạng thái đèn giao thông lên frame.
+
+    Args:
+        frame: Frame ảnh gốc.
+        state: Trạng thái đèn — ``'RED'``, ``'GREEN'``, hoặc ``'YELLOW'``.
+        position: Toạ độ ``(x, y)`` tâm hình tròn đèn.
+
+    Returns:
+        Frame đã vẽ.
+    """
+    color = _LIGHT_COLOR_MAP.get(state.upper(), COLOR_RED)
+    cv2.circle(frame, position, 30, color, -1)
+    cv2.putText(
+        frame, state.upper(), (position[0] + 40, position[1] + 10),
+        cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2, cv2.LINE_AA,
+    )
+    return frame
+
+
+def draw_zone_overlay(
+    frame: np.ndarray,
+    polygon: np.ndarray,
+    color: Tuple[int, int, int] = COLOR_RED,
+    alpha: float = 0.25,
+    thickness: int = 2,
+) -> np.ndarray:
+    """Vẽ zone overlay bán trong suốt kèm viền polygon.
+
+    Args:
+        frame: Frame ảnh gốc (sẽ bị thay đổi in-place).
+        polygon: Polygon dạng OpenCV ``(N, 1, 2)`` dtype int32.
+        color: Màu zone theo BGR.
+        alpha: Độ trong suốt lớp fill (0.0 đến 1.0).
+        thickness: Độ dày viền polygon.
+
+    Returns:
+        Frame đã được vẽ zone overlay.
+    """
+    overlay = frame.copy()
+    cv2.fillPoly(overlay, [polygon], color)
+    cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+    cv2.polylines(frame, [polygon], isClosed=True, color=color, thickness=thickness)
+    return frame
+
+
+def draw_violation_alert(
+    frame: np.ndarray,
+    text: str = "VIOLATION",
+    color: Tuple[int, int, int] = COLOR_RED,
+) -> np.ndarray:
+    """Vẽ cảnh báo vi phạm nổi bật lên phần trên frame.
+
+    Hiển thị banner bán trong suốt kèm text cảnh báo.
+
+    Args:
+        frame: Frame ảnh gốc.
+        text: Nội dung cảnh báo.
+        color: Màu text và viền BGR.
+
+    Returns:
+        Frame đã vẽ.
+    """
+    h, w = frame.shape[:2]
+    # Banner bán trong suốt phía trên
+    overlay = frame.copy()
+    banner_h = 60
+    cv2.rectangle(overlay, (0, 0), (w, banner_h), color, -1)
+    cv2.addWeighted(overlay, 0.4, frame, 0.6, 0, frame)
+    # Text cảnh báo canh giữa
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 1.5
+    thickness = 3
+    (tw, th), _ = cv2.getTextSize(text, font, font_scale, thickness)
+    tx = (w - tw) // 2
+    ty = (banner_h + th) // 2
+    cv2.putText(
+        frame, text, (tx, ty),
+        font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA,
+    )
+    return frame
+
+
+def draw_detections(
+    frame: np.ndarray,
+    results: list,
+    bbox_color: Tuple[int, int, int] = COLOR_BLUE,
+    violation_color: Tuple[int, int, int] = COLOR_RED,
+    text_color: Tuple[int, int, int] = COLOR_GREEN,
+    bbox_thickness: int = 2,
+    font_scale: float = 0.7,
+    font_thickness: int = 2,
+) -> np.ndarray:
+    """Vẽ detection results lên frame (bbox + plate text + violation alert).
+
+    Args:
+        frame: Frame ảnh gốc (sẽ bị thay đổi in-place).
+        results: Danh sách MiniPipelineResult (duck-typed để tránh circular import).
+            Mỗi result cần có: detection (với bbox, confidence), plate_text, is_violation.
+        bbox_color: Màu bbox mặc định (BGR).
+        violation_color: Màu bbox khi phát hiện vi phạm (BGR).
+        text_color: Màu text biển số (BGR).
+        bbox_thickness: Độ dày viền bbox.
+        font_scale: Hệ số co giãn font cho plate text.
+        font_thickness: Độ dày nét chữ plate text.
+
+    Returns:
+        Frame đã vẽ annotations.
+    """
+    has_violation = False
+
+    for result in results:
+        detection = result.detection
+        plate_text = result.plate_text
+        is_violation = result.is_violation
+
+        x1, y1, x2, y2 = detection.bbox
+        confidence = detection.confidence
+
+        # Choose color based on violation status
+        color = violation_color if is_violation else bbox_color
+
+        # Draw bounding box with confidence label
+        label = f"{int(confidence * 100)}%"
+        draw_bbox(frame, (x1, y1, x2, y2), color=color, thickness=bbox_thickness, label=label)
+
+        # Draw plate text above bbox if recognized
+        if plate_text and plate_text.lower() != "unknown":
+            text_y = max(y1 - 35, 20)
+            draw_text(
+                frame,
+                plate_text,
+                pos=(x1, text_y),
+                font_scale=font_scale,
+                font_thickness=font_thickness,
+                text_color=text_color,
+            )
+
+        if is_violation:
+            has_violation = True
+
+    # Draw violation alert banner once if any violation detected
+    if has_violation:
+        draw_violation_alert(frame, text="VIOLATION DETECTED")
+
+    return frame

@@ -83,6 +83,11 @@ class DetectionConfig(BaseModel):
     confidence_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     iou_threshold: float = Field(default=0.45, ge=0.0, le=1.0)
     image_size: int = Field(default=640, ge=32)
+    inference_interval_frames: int = Field(
+        default=3,
+        ge=1,
+        description="Run YOLO/OCR once every N rendered frames",
+    )
     device: str = Field(
         default="auto",
         description="'auto' | 'cuda:0' | 'cpu'",
@@ -134,6 +139,96 @@ class OCRConfig(BaseModel):
     det_model_dir: str = ""
     rec_model_dir: str = ""
     confidence_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
+
+
+class OCRCacheConfig(BaseModel):
+    """Cấu hình OCR caching để tối ưu FPS.
+
+    Khi enabled, chỉ gọi PaddleOCR cho detection mới (cache miss).
+    Các frame sau reuse kết quả OCR nếu bbox match theo IOU.
+
+    Attributes:
+        enabled: Bật/tắt OCR caching.
+        iou_threshold: Ngưỡng IOU tối thiểu để match bbox cũ-mới.
+            Mặc định 0.3 vì FPS thấp (≤5) gây displacement lớn giữa frames.
+        max_cache_size: Số plate tối đa trong cache.
+        cache_ttl_frames: Số frame tối đa giữ cache entry trước khi expire.
+        ocr_quality_frames: Số lần OCR tối đa cho cùng một plate
+            (lấy kết quả confidence cao nhất).
+    """
+
+    enabled: bool = True
+    iou_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
+    max_cache_size: int = Field(default=50, ge=1)
+    cache_ttl_frames: int = Field(default=150, ge=1)
+    ocr_quality_frames: int = Field(default=1, ge=1)
+
+
+class PreprocessingConfig(BaseModel):
+    """Cấu hình tiền xử lý ảnh biển số trước OCR.
+
+    Tất cả tham số đều có thể override qua ``config/local.yaml``
+    hoặc env var với prefix ``RLVDS_PREPROCESSING__``.
+
+    Attributes:
+        upscale_factor: Hệ số phóng to ảnh (cv2.INTER_CUBIC). Mặc định 2x.
+        denoise_h: Cường độ lọc noise cho fastNlMeansDenoising.
+            Giá trị cao hơn → mịn hơn nhưng mất chi tiết.
+        denoise_template_window: Kích thước cửa sổ template (px, lẻ).
+        denoise_search_window: Kích thước cửa sổ tìm kiếm (px, lẻ).
+        clahe_clip_limit: Clip Limit của CLAHE; cao hơn → tương phản mạnh hơn.
+        clahe_tile_grid_size: Kích thước tile cho CLAHE ``(W, H)``.
+        expand_ratio: Tỷ lệ mở rộng bbox khi crop (0.0–1.0). Mặc định 15%.
+        min_plate_width: Chiều rộng tối thiểu (px) của crop hợp lệ.
+        min_plate_height: Chiều cao tối thiểu (px) của crop hợp lệ.
+    """
+
+    upscale_factor: float = Field(
+        default=2.0, gt=0.0, description="Hệ số phóng to ảnh (cv2.INTER_CUBIC)"
+    )
+    denoise_h: float = Field(
+        default=10.0, ge=1.0, description="Cường độ lọc noise (fastNlMeansDenoising h)"
+    )
+    denoise_template_window: int = Field(
+        default=7, ge=1, description="Kích thước cửa sổ template cho NLM (px, lẻ)"
+    )
+    denoise_search_window: int = Field(
+        default=21, ge=1, description="Kích thước cửa sổ tìm kiếm cho NLM (px, lẻ)"
+    )
+    clahe_clip_limit: float = Field(
+        default=2.0, gt=0.0, description="Clip limit của CLAHE"
+    )
+    clahe_tile_grid_size: Tuple[int, int] = Field(
+        default=(8, 8), description="Tile grid size cho CLAHE (W, H)"
+    )
+    expand_ratio: float = Field(
+        default=0.15, ge=0.0, le=1.0,
+        description="Tỷ lệ mở rộng bbox khi crop biển số",
+    )
+    min_plate_width: int = Field(
+        default=20, ge=1, description="Chiều rộng tối thiểu của crop hợp lệ (px)"
+    )
+    min_plate_height: int = Field(
+        default=10, ge=1, description="Chiều cao tối thiểu của crop hợp lệ (px)"
+    )
+
+    @field_validator("clahe_tile_grid_size", mode="before")
+    @classmethod
+    def _coerce_tile_grid(cls, v: Any) -> Tuple[int, int]:
+        """YAML trả về list — chuyển thành tuple (W, H)."""
+        if isinstance(v, (list, tuple)) and len(v) == 2:
+            return tuple(int(x) for x in v)  # type: ignore[return-value]
+        raise ValueError(
+            f"clahe_tile_grid_size phải là [W, H] với 2 phần tử, nhận {v!r}"
+        )
+
+    @field_validator("denoise_template_window", "denoise_search_window", mode="after")
+    @classmethod
+    def _ensure_odd_window(cls, v: int) -> int:
+        """OpenCV fastNlMeansDenoising yêu cầu window size là số lẻ."""
+        if v % 2 == 0:
+            raise ValueError(f"Window size phải là số lẻ, nhận {v}")
+        return v
 
 
 class DatabaseConfig(BaseModel):
@@ -202,6 +297,18 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: Any,
+        env_settings: Any,
+        dotenv_settings: Any,
+        file_secret_settings: Any,
+    ) -> tuple[Any, ...]:
+        """Make environment variables override YAML-loaded init values."""
+        return env_settings, init_settings, dotenv_settings, file_secret_settings
+
     # -- Sub configs --
     video: VideoConfig = Field(default_factory=VideoConfig)
     detection: DetectionConfig = Field(default_factory=DetectionConfig)
@@ -209,6 +316,8 @@ class Settings(BaseSettings):
     spatial: SpatialConfig = Field(default_factory=SpatialConfig)
     temporal: TemporalConfig = Field(default_factory=TemporalConfig)
     ocr: OCRConfig = Field(default_factory=OCRConfig)
+    ocr_cache: OCRCacheConfig = Field(default_factory=OCRCacheConfig)
+    preprocessing: PreprocessingConfig = Field(default_factory=PreprocessingConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
 

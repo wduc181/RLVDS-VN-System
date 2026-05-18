@@ -135,7 +135,8 @@ Video → [Polygon Mask] → [YOLO Detect] → [Crop & Preprocess] → [OCR] →
 * **Sai số thời gian:** Logic đèn đỏ giả lập có thể không khớp hoàn toàn với đèn thực tế nếu không có sự đồng bộ từ sensor.
 * **Tọa độ vật thể:** Nếu xe chỉ lấn một phần nhỏ vào vùng đa giác, việc xác định vi phạm cần cấu hình ngưỡng chính xác để tránh tranh cãi.
 * **Chất lượng video:** Video có độ phân giải thấp hoặc rung lắc có thể làm biển số bị biến dạng.
-* **Lỗi OCR:** Ký tự dễ nhầm lẫn (O/0, B/8, G/6) — cần post-processing logic.
+* **Lỗi OCR:** Ký tự dễ nhầm lẫn (O/0, B/8, G/6) — cần post-processing logic. Ngoài ra PaddleOCR có thể  phải đọc từng frame một nên từng frame phải đi qua Yolov5 và Paddle với độ trễ nhất định => vòng lặp video bắt buộc phải dừng lại chờ PaddleOCR đọc xong từng chữ một, nên FPS bị tụt nghiêm trọng
+
 * **Biển số 2 dòng:** Xe máy có biển số 2 hàng, cần phân loại line alignment chính xác.
 
 ---
@@ -154,26 +155,26 @@ Video → [Polygon Mask] → [YOLO Detect] → [Crop & Preprocess] → [OCR] →
 ### Phase 2: Phát triển Core Modules (Tuần 3-5)
 | Task | Mô tả | Status |
 |------|-------|--------|
-| Ingestion Module | Video capture, frame iterator | 🔄 In Progress |
-| Detection Module | Tích hợp YOLOv5, license plate detection | 🔄 In Progress |
-| OCR Module | PaddleOCR + YOLOv5 char detect | 🔄 In Progress |
-| Spatial Module | Polygon masking, point-in-polygon | 🔄 In Progress |
-| Temporal Module | Traffic light FSM, violation logic | 🔄 In Progress |
-| Image Preprocessing | Upscale, denoise, contrast (CLAHE) | 🔄 In Progress |
+| Ingestion Module | Video capture, frame iterator | ✅ Done |
+| Detection Module | Tích hợp YOLOv5, license plate detection | ✅ Done |
+| OCR Module | PaddleOCR + YOLOv5 char detect | ✅ Done  |
+| Spatial Module | Polygon masking, point-in-polygon | ✅ Done |
+| Temporal Module | Traffic light FSM, violation logic | ✅ Done |
+| Image Preprocessing | Upscale, denoise, contrast (CLAHE) | ✅ Done|
 
 ### Phase 3: Tích hợp & UI (Tuần 6-7)
 | Task | Mô tả | Status |
 |------|-------|--------|
-| Pipeline Integration | Kết nối các modules thành pipeline | ⬜ Not Started |
-| Persistence Layer | SQLite database, CRUD + data cleaning | ⬜ Not Started |
-| Streamlit UI | Giao diện web hiển thị kết quả | ⬜ Not Started |
+| Pipeline Integration | Kết nối các modules thành pipeline | ✅ Done |
+| Persistence Layer | SQLite database, CRUD + data cleaning | 🔄 In Progress |
+| Streamlit UI | Giao diện web hiển thị kết quả | 🔄 In Progress |
 | Tracking (Optional) | Multi-object tracking | ⬜ Not Started |
 
 ### Phase 4: Testing & Hoàn thiện (Tuần 8)
 | Task | Mô tả | Status |
 |------|-------|--------|
-| Unit Testing | Viết tests cho từng module | ⬜ Not Started |
-| Integration Testing | Test toàn bộ pipeline | ⬜ Not Started |
-| Performance Tuning | Tối ưu tốc độ xử lý | ⬜ Not Started |
-| Documentation | Hoàn thiện docs | ⬜ Not Started |
-| Demo | Chuẩn bị demo | ⬜ Not Started |
+| Unit Testing | Viết tests cho từng module | 🔄 In Progress |
+| Integration Testing | Test toàn bộ pipeline | 🔄 In Progress|
+| Performance Tuning | Tối ưu tốc độ xử lý | 🔄 In Progress |
+| Documentation | Hoàn thiện docs | 🔄 In Progress |
+| Demo | Chuẩn bị demo | 🔄 In Progress|

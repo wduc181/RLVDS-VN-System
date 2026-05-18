@@ -1,10 +1,5 @@
-"""
-RLVDS Core Package
-==================
+"""RLVDS core exports."""
 
-Chứa các abstract base classes và pipeline orchestrator.
+from rlvds.core.mini_pipeline import MiniPipeline, MiniPipelineResult
 
-Modules:
-    - base.py: Abstract base classes cho các components
-    - pipeline.py: Main processing pipeline
-"""
+__all__ = ["MiniPipeline", "MiniPipelineResult"]

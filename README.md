@@ -111,14 +111,40 @@ git clone <repo-url>
 cd RLVDS-VN-System
 
 # 2. Tạo conda environment
-conda create -n rlvds python=3.10 -y
-conda activate rlvds
+conda create -n lpr_env python=3.10 -y
+conda activate lpr_env
 
 # 3. Cài đặt dependencies
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
-
-# 4. Download model weights
-# (Đang cập nhật)
 ```
 
 ## Cách sử dụng (Đang cập nhật)
+
+## Chạy bằng Docker Compose
+
+Compose mặc định chạy Streamlit tại `http://localhost:8501` và đặt SQLite
+trong `tmpfs` của container (`/tmp/rlvds/rlvds.db`). Vì vậy DB không được
+lưu ra máy host và sẽ mất khi container bị xóa.
+
+```bash
+DOCKER_BUILDKIT=0 docker compose up --build
+```
+
+Nếu muốn dọn sạch container sau khi chạy:
+
+```bash
+docker compose down
+```
+
+Video mẫu và model weights vẫn được mount read-only từ:
+
+- `./data/samples` → `/app/data/samples`
+- `./weights` → `/app/weights`
+
+Ghi chú GPU: image mặc định dùng CPU Paddle để dễ chạy trên Docker thường.
+Nếu muốn build với Paddle GPU:
+
+```bash
+DOCKER_BUILDKIT=0 PADDLE_PACKAGE=paddlepaddle-gpu==2.6.2 docker compose build
+```

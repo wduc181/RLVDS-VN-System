@@ -24,6 +24,7 @@ detection:
   confidence_threshold: 0.5                # Ngưỡng confidence (0.0–1.0)
   iou_threshold: 0.45                      # Ngưỡng IoU cho NMS
   image_size: 640                          # Input size cho model
+  inference_interval_frames: 3             # Chạy YOLO/OCR mỗi N frame hiển thị
   device: "auto"                           # "auto" | "cuda:0" | "cpu"
 
 # --- Tracking ---
@@ -35,9 +36,9 @@ tracking:
 
 # --- Spatial (Vùng vi phạm) ---
 spatial:
-  violation_zone: []         # Polygon vertices: [[x1,y1], [x2,y2], ...]
+  violation_zone: [[600, 450], [1200, 450], [1260, 700], [600, 700]]   # Polygon vertices: [[x1,y1], [x2,y2], ...]
   zone_color: [0, 0, 255]   # BGR color cho hiển thị polygon
-  zone_thickness: 2          # Độ dày nét vẽ polygon
+  zone_thickness: 1          # Độ dày nét vẽ polygon
 
 # --- Temporal (Đèn giao thông) ---
 temporal:
@@ -53,6 +54,26 @@ ocr:
   det_model_dir: ""          # Để trống = tự download model mặc định
   rec_model_dir: ""          # Để trống = tự download model mặc định
   confidence_threshold: 0.6  # Ngưỡng confidence cho OCR result
+
+# --- OCR Cache (Frame Skipping) ---
+ocr_cache:
+  enabled: true              # Bật caching để tối ưu FPS
+  iou_threshold: 0.3         # Ngưỡng IOU match bbox (thấp vì FPS thấp → displacement lớn)
+  max_cache_size: 50          # Số plate tối đa trong cache
+  cache_ttl_frames: 150       # Số frame giữ entry trước khi expire
+  ocr_quality_frames: 1       # Số lần OCR tối đa cho cùng plate (1 = ưu tiên FPS)
+
+# --- Image Preprocessing (crop + upscale + denoise + CLAHE) ---
+preprocessing:
+  upscale_factor: 2.0           # Hệ số phóng to ảnh biển số (cv2.INTER_CUBIC)
+  denoise_h: 10.0                # Cường độ lọc noise; cao hơn = mịn hơn, mất chi tiết hơn
+  denoise_template_window: 7    # Template window size (px, lẻ)
+  denoise_search_window: 21     # Search window size (px, lẻ)
+  clahe_clip_limit: 2.0         # Clip limit CLAHE; cao hơn = tương phản mạnh hơn
+  clahe_tile_grid_size: [8, 8]  # Tile grid size (W, H) cho CLAHE
+  expand_ratio: 0.15            # Mở rộng bbox 15% mỗi phía khi crop biển số
+  min_plate_width: 20           # Bỏ qua crop nhỏ hơn ngưỡng này (px)
+  min_plate_height: 10          # Bỏ qua crop nhỏ hơn ngưỡng này (px)
 
 # --- Database ---
 database:
