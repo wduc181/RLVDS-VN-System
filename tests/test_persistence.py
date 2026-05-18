@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+import cv2
 import numpy as np
 import pytest
 
@@ -14,10 +15,10 @@ from rlvds.persistence.models import ViolationCreate, ViolationRecord, Violation
 from rlvds.persistence.repository import ViolationRepository
 
 
-def _build_repo(tmp_path: Path) -> ViolationRepository:
+def _build_repo(tmp_path: Path, *, debug: bool = False) -> ViolationRepository:
     db_path = tmp_path / "rlvds_test.db"
     db = Database(str(db_path))
-    return ViolationRepository(db, violations_dir=str(tmp_path / "violations"))
+    return ViolationRepository(db, violations_dir=str(tmp_path / "violations"), debug=debug)
 
 
 def test_database_supports_sqlite_memory() -> None:
@@ -140,6 +141,53 @@ def test_record_violation_saves_both_images_and_paths(tmp_path: Path) -> None:
     )
     assert second is not None
     assert repo.count() == 2
+
+
+def test_record_violation_does_not_save_raw_debug_crop_by_default(tmp_path: Path) -> None:
+    repo = _build_repo(tmp_path, debug=False)
+    frame = np.zeros((80, 120, 3), dtype=np.uint8)
+    det = Detection(bbox=(10, 10, 60, 40), confidence=0.88)
+    raw_plate = np.ones((30, 60, 3), dtype=np.uint8) * 77
+    preprocessed_plate = np.ones((30, 60), dtype=np.uint8) * 255
+
+    violation_id = repo.record_violation(
+        frame=frame,
+        detection=det,
+        plate_text="51F-22222",
+        light_state="RED",
+        preprocessed_plate=preprocessed_plate,
+        raw_plate=raw_plate,
+        event_time=datetime(2026, 3, 25, 12, 0, 0),
+    )
+
+    assert violation_id is not None
+    assert not (tmp_path / "violations" / "plate_debug").exists()
+
+
+def test_record_violation_saves_raw_debug_crop_when_debug_enabled(tmp_path: Path) -> None:
+    repo = _build_repo(tmp_path, debug=True)
+    frame = np.zeros((80, 120, 3), dtype=np.uint8)
+    det = Detection(bbox=(10, 10, 60, 40), confidence=0.88)
+    raw_plate = np.ones((30, 60, 3), dtype=np.uint8) * 77
+    preprocessed_plate = np.ones((30, 60), dtype=np.uint8) * 255
+
+    violation_id = repo.record_violation(
+        frame=frame,
+        detection=det,
+        plate_text="51F-33333",
+        light_state="RED",
+        preprocessed_plate=preprocessed_plate,
+        raw_plate=raw_plate,
+        event_time=datetime(2026, 3, 25, 12, 0, 0),
+    )
+
+    assert violation_id is not None
+    debug_files = list((tmp_path / "violations" / "plate_debug").glob("*_raw.png"))
+    assert len(debug_files) == 1
+    saved = cv2.imread(str(debug_files[0]), cv2.IMREAD_COLOR)
+    assert saved is not None
+    assert saved.shape == raw_plate.shape
+    assert np.array_equal(saved, raw_plate)
 
 
 def test_delete_does_not_remove_files_outside_violations_dir(tmp_path: Path) -> None:

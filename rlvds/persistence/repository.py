@@ -30,13 +30,21 @@ logger = get_logger(__name__)
 class ViolationRepository(BaseRepository):
     """Data access layer for violations in SQLite."""
 
-    def __init__(self, database: Database, violations_dir: str | None = None) -> None:
+    def __init__(
+        self,
+        database: Database,
+        violations_dir: str | None = None,
+        debug: bool | None = None,
+    ) -> None:
         self._db = database
+        settings = get_settings()
         if violations_dir is None:
-            violations_dir = get_settings().paths.violations_dir
+            violations_dir = settings.paths.violations_dir
         self._base_dir = Path(violations_dir)
         self._scene_dir = self._base_dir / "scene"
         self._plate_dir = self._base_dir / "plate"
+        self._plate_debug_dir = self._base_dir / "plate_debug"
+        self._debug = settings.debug if debug is None else debug
         self._scene_dir.mkdir(parents=True, exist_ok=True)
         self._plate_dir.mkdir(parents=True, exist_ok=True)
         self._db.connect()
@@ -376,6 +384,7 @@ class ViolationRepository(BaseRepository):
         plate_text: str,
         light_state: str,
         preprocessed_plate: np.ndarray | None = None,
+        raw_plate: np.ndarray | None = None,
         polygon: np.ndarray | None = None,
         event_time: datetime | None = None,
     ) -> tuple[str, str]:
@@ -415,6 +424,9 @@ class ViolationRepository(BaseRepository):
 
         plate_img = self._build_plate_image(frame, detection, preprocessed_plate)
         self._safe_write(plate_path, plate_img)
+        if self._debug and raw_plate is not None and raw_plate.size > 0:
+            debug_path = (self._plate_debug_dir / f"{safe_plate}_{suffix}_raw.png").resolve()
+            self._safe_write(debug_path, raw_plate)
         return str(scene_path), str(plate_path)
 
     def record_violation(
@@ -425,6 +437,7 @@ class ViolationRepository(BaseRepository):
         plate_text: str,
         light_state: str,
         preprocessed_plate: np.ndarray | None = None,
+        raw_plate: np.ndarray | None = None,
         polygon: np.ndarray | None = None,
         zone_id: str = "default",
         status: str = "VIOLATION",
@@ -460,6 +473,7 @@ class ViolationRepository(BaseRepository):
                 plate_text=plate_text,
                 light_state=light_state,
                 preprocessed_plate=preprocessed_plate,
+                raw_plate=raw_plate,
                 polygon=polygon,
                 event_time=event_time,
             )

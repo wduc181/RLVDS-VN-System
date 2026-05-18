@@ -24,6 +24,7 @@ detection:
   confidence_threshold: 0.5                # Ngưỡng confidence (0.0–1.0)
   iou_threshold: 0.45                      # Ngưỡng IoU cho NMS
   image_size: 640                          # Input size cho model
+  inference_interval_frames: 3             # Chạy YOLO/OCR mỗi N frame hiển thị
   device: "auto"                           # "auto" | "cuda:0" | "cpu"
 
 # --- Tracking ---
@@ -60,12 +61,12 @@ ocr_cache:
   iou_threshold: 0.3         # Ngưỡng IOU match bbox (thấp vì FPS thấp → displacement lớn)
   max_cache_size: 50          # Số plate tối đa trong cache
   cache_ttl_frames: 150       # Số frame giữ entry trước khi expire
-  ocr_quality_frames: 3       # Số lần OCR tối đa cho cùng plate (lấy best confidence)
+  ocr_quality_frames: 1       # Số lần OCR tối đa cho cùng plate (1 = ưu tiên FPS)
 
 # --- Image Preprocessing (crop + upscale + denoise + CLAHE) ---
 preprocessing:
   upscale_factor: 2.0           # Hệ số phóng to ảnh biển số (cv2.INTER_CUBIC)
-  denoise_h: 30.0                # Cường độ lọc noise; cao hơn = mịn hơn, mất chi tiết hơn
+  denoise_h: 10.0                # Cường độ lọc noise; cao hơn = mịn hơn, mất chi tiết hơn
   denoise_template_window: 7    # Template window size (px, lẻ)
   denoise_search_window: 21     # Search window size (px, lẻ)
   clahe_clip_limit: 2.0         # Clip limit CLAHE; cao hơn = tương phản mạnh hơn

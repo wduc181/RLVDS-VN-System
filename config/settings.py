@@ -83,6 +83,11 @@ class DetectionConfig(BaseModel):
     confidence_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     iou_threshold: float = Field(default=0.45, ge=0.0, le=1.0)
     image_size: int = Field(default=640, ge=32)
+    inference_interval_frames: int = Field(
+        default=3,
+        ge=1,
+        description="Run YOLO/OCR once every N rendered frames",
+    )
     device: str = Field(
         default="auto",
         description="'auto' | 'cuda:0' | 'cpu'",
@@ -156,7 +161,7 @@ class OCRCacheConfig(BaseModel):
     iou_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
     max_cache_size: int = Field(default=50, ge=1)
     cache_ttl_frames: int = Field(default=150, ge=1)
-    ocr_quality_frames: int = Field(default=3, ge=1)
+    ocr_quality_frames: int = Field(default=1, ge=1)
 
 
 class PreprocessingConfig(BaseModel):
@@ -182,7 +187,7 @@ class PreprocessingConfig(BaseModel):
         default=2.0, gt=0.0, description="Hệ số phóng to ảnh (cv2.INTER_CUBIC)"
     )
     denoise_h: float = Field(
-        default=30.0, ge=1.0, description="Cường độ lọc noise (fastNlMeansDenoising h)"
+        default=10.0, ge=1.0, description="Cường độ lọc noise (fastNlMeansDenoising h)"
     )
     denoise_template_window: int = Field(
         default=7, ge=1, description="Kích thước cửa sổ template cho NLM (px, lẻ)"

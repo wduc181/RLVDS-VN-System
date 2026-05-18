@@ -92,6 +92,9 @@ class Pipeline:
 
         prev_time = time.perf_counter()
         violation_count = 0
+        frame_idx = 0
+        detection_results: List = []
+        inference_interval = max(1, self._get_inference_interval_frames())
 
         try:
             target_fps = self._cfg.video.fps
@@ -103,6 +106,9 @@ class Pipeline:
             for frame in frame_iter:  # type: ignore[union-attr]
                 if not self._running:
                     break
+                frame_idx += 1
+                raw_frame = frame.copy()
+                display_frame = raw_frame.copy()
 
                 now = time.perf_counter()
                 fps = round(1 / (now - prev_time), 1) if now != prev_time else 0.0
@@ -110,26 +116,30 @@ class Pipeline:
 
                 light_state = self.traffic_light.get_state().value
 
+                should_run_detection = (frame_idx - 1) % inference_interval == 0
+                if should_run_detection:
+                    detection_results = self._process_detections(raw_frame)
+                    saved = self._persist_violations(
+                        raw_frame,
+                        detection_results,
+                        light_state,
+                    )
+                    violation_count += saved
+
                 draw_zone_overlay(
-                    frame,
+                    display_frame,
                     self.zone.polygon,
                     color=self._cfg.spatial.zone_color,
                     alpha=0.25,
                     thickness=self._cfg.spatial.zone_thickness,
                 )
-
-                detection_results = self._process_detections(frame)
-
-                saved = self._persist_violations(frame, detection_results, light_state)
-                violation_count += saved
-
-                draw_light_status(frame, light_state)
-                draw_fps(frame, fps)
-                draw_detections(frame, detection_results)
+                draw_light_status(display_frame, light_state)
+                draw_fps(display_frame, fps)
+                draw_detections(display_frame, detection_results)
 
                 if display:
-                    display_frame = cv2.resize(frame, (1280, 720))
-                    cv2.imshow("RLVDS-VN", display_frame)
+                    resized_frame = cv2.resize(display_frame, (1280, 720))
+                    cv2.imshow("RLVDS-VN", resized_frame)
                     if cv2.waitKey(1) & 0xFF == ord("q"):
                         break
 
@@ -204,6 +214,10 @@ class Pipeline:
             logger.error("Detection failed: %s", exc)
             return []
 
+    def _get_inference_interval_frames(self) -> int:
+        detection_cfg = getattr(self._cfg, "detection", None)
+        return int(getattr(detection_cfg, "inference_interval_frames", 1))
+
     def _persist_violations(
         self,
         frame: np.ndarray,
@@ -217,7 +231,11 @@ class Pipeline:
             if not result.is_violation or result.plate_text == "unknown":
                 continue
             det = result.detection
-            crop = det.crop(frame)
+            crop = self.detector.crop_plate(
+                det,
+                frame,
+                expand_ratio=self._cfg.preprocessing.expand_ratio,
+            )
             processed_plate = None
             if hasattr(self, "_preprocessor") and crop.size > 0:
                 processed = self._preprocessor.run_pipeline(crop)
@@ -229,6 +247,7 @@ class Pipeline:
                 plate_text=result.plate_text,
                 light_state=light_state,
                 preprocessed_plate=processed_plate,
+                raw_plate=crop,
                 polygon=self.zone.polygon,
                 zone_id=self.zone.zone_id,
                 confidence=det.confidence,

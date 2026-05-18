@@ -99,7 +99,7 @@ class CachedPipeline:
         violation_detector: ViolationDetector,
         cache: PlateTrackCache,
         crop_expand_ratio: float = 0.15,
-        ocr_quality_frames: int = 3,
+        ocr_quality_frames: int = 1,
     ) -> None:
         self._detector = detector
         self._ocr = ocr
