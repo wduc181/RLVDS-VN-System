@@ -36,6 +36,7 @@ class LicensePlateOCR(BaseOCR):
         self._lang = lang
         self._use_gpu = use_gpu
         self._confidence_threshold = confidence_threshold
+        self._use_http = (ocr_engine is None)
         self._ocr = ocr_engine if ocr_engine is not None else self._build_engine()
         self._preprocessor = (
             preprocessor
@@ -61,16 +62,49 @@ class LicensePlateOCR(BaseOCR):
         """
         if image is None or image.size == 0:
             return OCRResult(text="unknown", confidence=0.0)
+
+        # Thử gửi ảnh RAW qua HTTP OCR Microservice trước.
+        # Bỏ qua preprocessing phía client — PaddleOCR tự xử lý
+        # nội bộ (resize, normalize) hiệu quả hơn.
+        # Tiết kiệm ~52ms preprocessing (denoise + upscale + CLAHE).
+        if self._use_http:
+            import urllib.request
+            import urllib.error
+            import json
+            import cv2
+
+            success, encoded_img = cv2.imencode('.jpg', image)
+            if success:
+                req_data = encoded_img.tobytes()
+                try:
+                    req = urllib.request.Request(
+                        "http://127.0.0.1:8502",
+                        data=req_data,
+                        headers={'Content-Type': 'application/octet-stream'}
+                    )
+                    with urllib.request.urlopen(req, timeout=5) as response:
+                        resp_data = response.read().decode('utf-8')
+                        resp_json = json.loads(resp_data)
+                        raw_result = resp_json.get('raw_result')
+                        parsed = self._parse_paddle_result(raw_result)
+                        if parsed is None:
+                            return OCRResult(text="unknown", confidence=0.0)
+                        text = format_plate(parsed.text)
+                        if not text:
+                            return OCRResult(text="unknown", confidence=0.0)
+                        return OCRResult(text=text, confidence=parsed.confidence)
+                except Exception as e:
+                    logger.debug("Failed to connect to OCR microservice, using local engine: %s", e)
+
+        # Fallback về chạy cục bộ trong cùng tiến trình
+        # Chỉ preprocess khi chạy local (cần CLAHE/denoise vì model local
+        # không có preprocessing nội bộ như PaddleOCR pipeline).
         if self._ocr is None:
             logger.warning("PaddleOCR engine unavailable; returning unknown")
             return OCRResult(text="unknown", confidence=0.0)
 
         processed = self.preprocess(image)
-        try:
-            result = self._ocr.ocr(processed, cls=False)
-        except TypeError:
-            # Test doubles and older wrappers may not expose PaddleOCR's cls kwarg.
-            result = self._ocr.ocr(processed)
+        result = self._ocr.ocr(processed)
         parsed = self._parse_paddle_result(result)
         if parsed is None:
             return OCRResult(text="unknown", confidence=0.0)
@@ -81,26 +115,44 @@ class LicensePlateOCR(BaseOCR):
         return OCRResult(text=text, confidence=parsed.confidence)
 
     def _build_engine(self) -> Any | None:
+        # Kiểm tra xem OCR Microservice đã chạy chưa, nếu có thì không cần load model cục bộ
+        import urllib.request
+        import urllib.error
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:8502", timeout=0.5) as _:
+                pass
+            logger.info("Detected active OCR Microservice. Bypassing local engine initialization.")
+            return None
+        except urllib.error.HTTPError:
+            # HTTPError phản hồi từ server -> Server online
+            logger.info("Detected active OCR Microservice. Bypassing local engine initialization.")
+            return None
+        except Exception:
+            # Server offline -> Build local engine
+            pass
+
         try:
             from paddleocr import PaddleOCR  # type: ignore
         except Exception as exc:  # noqa: BLE001
             logger.warning("Cannot import PaddleOCR: %s", exc)
             return None
 
+        # Force PaddlePaddle to use 1 thread to prevent CPU core exhaustion
+        try:
+            import paddle
+            paddle.set_num_threads(1)
+            logger.info("Set PaddlePaddle execution thread count to 1")
+        except Exception as exc:
+            logger.warning("Cannot set PaddlePaddle threads: %s", exc)
+
         # HARDCODE use_gpu=False để tránh xung đột cuDNN
         # PyTorch (CUDA 12.4) kéo cuDNN 9.x, PaddlePaddle 2.6.2 chỉ tương thích cuDNN 8.x
         # OCR xử lý ảnh biển số nhỏ (~150x50px) nên CPU đủ nhanh, không cần GPU
-        if self._use_gpu:
-            logger.warning(
-                "OCR use_gpu=True in config is overridden — PaddleOCR forced to CPU "
-                "to avoid cuDNN 8.x/9.x conflict with PyTorch CUDA 12.4"
-            )
         try:
             logger.info("Initializing PaddleOCR with lang='%s', use_gpu=False (CPU-only)...", self._lang)
             return PaddleOCR(
                 lang=self._lang,
                 use_gpu=False,  # LUÔN dùng CPU để tránh xung đột cuDNN
-                use_angle_cls=False,
                 show_log=False,
             )
         except Exception as e1:
@@ -109,7 +161,7 @@ class LicensePlateOCR(BaseOCR):
             # Try initializing fallback with CPU
             try:
                 logger.info("Trying to initialize PaddleOCR default (CPU-only)...")
-                return PaddleOCR(use_gpu=False, use_angle_cls=False, show_log=False)
+                return PaddleOCR(use_gpu=False, show_log=False)
             except Exception as e2:
                 logger.error("Failed to initialize PaddleOCR: %s - %s", type(e2).__name__, e2)
                 return None
@@ -126,24 +178,37 @@ class LicensePlateOCR(BaseOCR):
         else:
             entries = [line for line in lines if _is_paddle_entry(line)]
 
+        # Sort entries by the minimum Y coordinate to ensure top-to-bottom order (critical for 2-line plates)
+        entries.sort(key=lambda line: min(p[1] for p in line[0]))
+
         texts: List[str] = []
         scores: List[float] = []
         for line in entries:
             payload = line[1]
             text = str(payload[0]).strip()
             score = float(payload[1])
-            if score < self._confidence_threshold:
+            
+            # Skip extreme low confidence noise boxes instead of rejecting the whole plate
+            if score < 0.4:
                 continue
+                
             normalized = clean_plate_text(text)
-            if normalized:
+            # Skip junk characters
+            if normalized and len(normalized) >= 2:
                 texts.append(normalized)
                 scores.append(score)
 
         if not texts:
             return None
 
-        merged = "-".join(texts) if len(texts) > 1 else texts[0]
+        # Calculate overall confidence
         confidence = sum(scores) / len(scores)
+        
+        # Only reject the plate if the average confidence is below the threshold
+        if confidence < self._confidence_threshold:
+            return None
+
+        merged = "-".join(texts) if len(texts) > 1 else texts[0]
         return OCRResult(text=merged, confidence=confidence)
 
 

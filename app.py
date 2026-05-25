@@ -7,18 +7,20 @@ Run:
 
 from __future__ import annotations
 
+import os
+# Force CPU thread limiting to prevent CPU starvation and keep FPS stable
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
 import time
 import warnings
 from pathlib import Path
-from typing import Any
 
 import cv2
-import numpy as np
-
-try:
-    import streamlit as st
-except ModuleNotFoundError:  # pragma: no cover - production installs streamlit.
-    st = None  # type: ignore[assignment]
+import streamlit as st
 
 # Suppress torch deprecation warnings from YOLOv5
 warnings.filterwarnings("ignore", message=".*torch.cuda.amp.autocast.*")
@@ -40,107 +42,13 @@ from rlvds.utils.visualization import (
     draw_zone_overlay,
     set_hd_resolution,
 )
+from rlvds.core.mini_pipeline import MiniPipeline
 from rlvds.core.cached_pipeline import CachedPipeline
 from rlvds.ocr.plate_cache import PlateTrackCache
+from rlvds.detection import LicensePlateDetector
+from rlvds.ocr.recognizer import LicensePlateOCR
 
 logger = get_logger(__name__)
-
-
-def _crop_plate_for_ocr(
-    detector: Any,
-    detection: Any,
-    frame: np.ndarray,
-    expand_ratio: float,
-) -> np.ndarray:
-    if detector is not None and hasattr(detector, "crop_plate"):
-        return detector.crop_plate(detection, frame, expand_ratio=expand_ratio)
-    return detection.crop(frame)
-
-
-def _process_stream_frame(
-    *,
-    frame: np.ndarray,
-    zone: ViolationZone,
-    traffic_light: TrafficLightFSM,
-    settings: Any,
-    pipeline: Any | None,
-    detector: Any | None,
-    repo: ViolationRepository | None,
-    preprocessor: PlatePreprocessor | None,
-    show_detection: bool,
-    detection_available: bool,
-    show_zone_overlay: bool,
-    show_fps: bool,
-    fps: float,
-    run_detection: bool = True,
-    cached_detection_results: list[Any] | None = None,
-) -> tuple[np.ndarray, list[Any], int, str, float]:
-    """Process one Streamlit frame while keeping OCR on the clean raw frame."""
-    will_run_detection = (
-        show_detection and run_detection and pipeline is not None and detection_available
-    )
-    raw_frame = frame.copy() if will_run_detection else frame
-    display_frame = frame
-
-    light_state = traffic_light.get_state().value
-    time_remaining = traffic_light.get_time_remaining()
-
-    if show_zone_overlay:
-        draw_zone_overlay(
-            display_frame,
-            zone.polygon,
-            color=settings.spatial.zone_color,
-            alpha=0.25,
-            thickness=settings.spatial.zone_thickness,
-        )
-    else:
-        zone.draw(display_frame)
-
-    detection_results: list[Any] = cached_detection_results or []
-    did_run_detection = False
-    if will_run_detection:
-        detection_results = pipeline.process_frame(raw_frame)
-        did_run_detection = True
-
-    if show_detection and detection_results:
-        draw_detections(display_frame, detection_results)
-
-    saved_violations = 0
-    if did_run_detection and repo is not None and detection_results:
-        for result in detection_results:
-            if not result.is_violation or result.plate_text == "unknown":
-                continue
-            det = result.detection
-            crop = _crop_plate_for_ocr(
-                detector,
-                det,
-                raw_frame,
-                settings.preprocessing.expand_ratio,
-            )
-            processed_plate = None
-            if preprocessor is not None and crop.size > 0:
-                processed = preprocessor.run_pipeline(crop)
-                if processed.size > 0:
-                    processed_plate = processed
-            inserted_id = repo.record_violation(
-                frame=raw_frame,
-                detection=det,
-                plate_text=result.plate_text,
-                light_state=light_state,
-                preprocessed_plate=processed_plate,
-                raw_plate=crop,
-                polygon=zone.polygon,
-                zone_id=zone.zone_id,
-                confidence=det.confidence,
-            )
-            if inserted_id is not None:
-                saved_violations += 1
-
-    draw_light_status(display_frame, light_state)
-    if show_fps:
-        draw_fps(display_frame, fps)
-
-    return display_frame, detection_results, saved_violations, light_state, time_remaining
 
 
 def _list_sample_videos(samples_dir: str) -> list[str]:
@@ -167,6 +75,22 @@ def _cleanup_video_source() -> None:
             st.session_state.get("frame_idx", 0),
         )
 
+    cached_pipeline = st.session_state.pop("cached_pipeline", None)
+    if cached_pipeline is not None and hasattr(cached_pipeline, "close"):
+        try:
+            cached_pipeline.close()
+        except Exception as exc:
+            logger.warning("Error while closing cached pipeline: %s", exc)
+
+    ocr_proc = st.session_state.pop("ocr_server_proc", None)
+    if ocr_proc is not None:
+        logger.info("Terminating background OCR Microservice process...")
+        try:
+            ocr_proc.terminate()
+            ocr_proc.wait(timeout=2)
+        except Exception as exc:
+            logger.warning("Error while terminating background OCR process: %s", exc)
+
     for key in (
         "frame_idx",
         "total_frames",
@@ -177,14 +101,22 @@ def _cleanup_video_source() -> None:
         "frame_buffer",
         "violation_count",
         "mini_pipeline",
-        "cached_pipeline",
-        "plate_detector",
         "detection_available",
         "violation_repo",
         "plate_preprocessor",
-        "last_detection_results",
+        "recorded_plates_cache",
     ):
         st.session_state.pop(key, None)
+    st.session_state.pop("frame_idx", None)
+    st.session_state.pop("total_frames", None)
+    st.session_state.pop("resolution", None)
+    st.session_state.pop("traffic_light", None)
+    st.session_state.pop("zone", None)
+    st.session_state.pop("violation_detector", None)
+    st.session_state.pop("frame_buffer", None)
+    st.session_state.pop("violation_count", None)
+    st.session_state.pop("mini_pipeline", None)
+    st.session_state.pop("detection_available", None)
 
 
 def _build_runtime_components() -> tuple[ViolationZone, TrafficLightFSM, ViolationDetector, FrameBuffer]:
@@ -213,9 +145,6 @@ def _build_runtime_components() -> tuple[ViolationZone, TrafficLightFSM, Violati
 
 
 def main() -> None:
-    if st is None:
-        raise RuntimeError("Streamlit is required to run app.py")
-
     st.set_page_config(page_title="RLVDS-VN", layout="wide")
     st.title("RLVDS-VN - Video Stream Test")
 
@@ -241,16 +170,6 @@ def main() -> None:
             "Enable plate detection",
             value=False,
             help="Enable detection + OCR overlay",
-        )
-        detection_interval = st.slider(
-            "Detection interval (frames)",
-            1,
-            10,
-            int(settings.detection.inference_interval_frames),
-            help=(
-                "Run YOLO/OCR once every N displayed frames; cached results "
-                "are reused between runs."
-            ),
         )
 
         if (
@@ -309,6 +228,56 @@ def main() -> None:
     if st.session_state.pop("should_start", False) and source_path:
         _cleanup_video_source()
 
+        # Khởi chạy OCR Microservice độc lập ẩn GPU
+        import subprocess
+        import sys
+        import urllib.request
+        import urllib.error
+
+        server_online = False
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:8502", timeout=0.2) as _:
+                server_online = True
+        except urllib.error.HTTPError:
+            server_online = True
+        except Exception:
+            server_online = False
+
+        if not server_online:
+            logger.info("Starting background OCR Microservice process...")
+            env = {**os.environ, "CUDA_VISIBLE_DEVICES": ""}
+            proc = subprocess.Popen(
+                [sys.executable, "rlvds/ocr/ocr_server.py"],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            st.session_state["ocr_server_proc"] = proc
+            
+            # Polling check (tối đa 10 giây) để đợi OCR Server khởi động hoàn tất
+            status_text = st.empty()
+            status_text.info("Đang khởi động OCR Microservice chạy ngầm trên CPU...")
+            for _ in range(20):
+                time.sleep(0.5)
+                try:
+                    with urllib.request.urlopen("http://127.0.0.1:8502", timeout=0.2) as _:
+                        server_online = True
+                        break
+                except urllib.error.HTTPError:
+                    server_online = True
+                    break
+                except Exception:
+                    pass
+            
+            if server_online:
+                status_text.success("OCR Microservice đã sẵn sàng!")
+                time.sleep(0.5)
+                status_text.empty()
+            else:
+                status_text.warning("Không kết nối được với OCR Microservice. Sẽ tự động dùng CPU cục bộ.")
+                time.sleep(1.0)
+                status_text.empty()
+
         try:
             src = VideoSource(source_path)
         except (FileNotFoundError, RuntimeError) as exc:
@@ -329,6 +298,7 @@ def main() -> None:
         st.session_state["violation_detector"] = violation_detector
         st.session_state["frame_buffer"] = frame_buffer
         st.session_state["violation_count"] = 0
+        st.session_state["recorded_plates_cache"] = set()
 
         try:
             db = Database(settings.database.url)
@@ -375,11 +345,13 @@ def main() -> None:
                     cache=plate_cache,
                     crop_expand_ratio=settings.preprocessing.expand_ratio,
                     ocr_quality_frames=settings.ocr_cache.ocr_quality_frames,
+                    async_ocr=settings.ocr_cache.async_ocr,
                 )
                 st.session_state["cached_pipeline"] = pipeline
-                logger.info("CachedPipeline initialized (iou_thresh=%.2f, ttl=%d)",
+                logger.info("CachedPipeline initialized (iou_thresh=%.2f, ttl=%d, async_ocr=%s)",
                             settings.ocr_cache.iou_threshold,
-                            settings.ocr_cache.cache_ttl_frames)
+                            settings.ocr_cache.cache_ttl_frames,
+                            settings.ocr_cache.async_ocr)
             else:
                 pipeline = MiniPipeline(
                     detector=detector,
@@ -391,7 +363,6 @@ def main() -> None:
                 logger.info("MiniPipeline initialized (cache disabled)")
 
             st.session_state["detection_available"] = detector.is_available()
-            st.session_state["plate_detector"] = detector
             if detector.is_available():
                 logger.info("Detection pipeline initialized successfully")
             else:
@@ -400,7 +371,6 @@ def main() -> None:
             logger.warning("Failed to initialize detection pipeline: %s", exc)
             st.session_state["mini_pipeline"] = None
             st.session_state["cached_pipeline"] = None
-            st.session_state["plate_detector"] = None
             st.session_state["detection_available"] = False
 
         st.session_state["running"] = True
@@ -432,18 +402,6 @@ def main() -> None:
     prev_time = time.perf_counter()
 
     while st.session_state.get("running", False):
-        now = time.perf_counter()
-
-        if now - prev_time < frame_interval:
-            # Skip — grab header only (fast, ~1ms, no decode)
-            if not src.grab_frame():
-                frame_idx = st.session_state.get("frame_idx", 0)
-                _cleanup_video_source()
-                st.session_state["running"] = False
-                video_placeholder.success(f"Completed - processed {frame_idx} frames.")
-                break
-            continue
-
         ok, frame = src.read_frame()
         if not ok or frame is None:
             frame_idx = st.session_state.get("frame_idx", 0)
@@ -451,75 +409,98 @@ def main() -> None:
             st.session_state["running"] = False
             video_placeholder.success(f"Completed - processed {frame_idx} frames.")
             break
+        # Always copy the raw frame for clean detection and OCR crops.
+        # This prevents zone overlays and bounding boxes from polluting the OCR input.
+        raw_frame = frame.copy()
 
+        now = time.perf_counter()
         dt = now - prev_time
-        fps = round(1 / dt, 1) if dt > 0 else 0.0
+        fps = int(1 / dt) if dt > 0 else 0
         prev_time = now
 
         frame_idx = st.session_state.get("frame_idx", 0) + 1
         st.session_state["frame_idx"] = frame_idx
 
+        light_state = traffic_light.get_state().value
+        time_remaining = traffic_light.get_time_remaining()
+
+        if show_zone_overlay:
+            draw_zone_overlay(
+                frame,
+                zone.polygon,
+                color=settings.spatial.zone_color,
+                alpha=0.25,
+                thickness=settings.spatial.zone_thickness,
+            )
+        else:
+            zone.draw(frame)
+
         detection_results = []
-        pipeline = None
         if show_detection:
             # Ưu tiên CachedPipeline, fallback sang MiniPipeline
             pipeline = (
                 st.session_state.get("cached_pipeline")
                 or st.session_state.get("mini_pipeline")
             )
-        cached_detection_results = st.session_state.get("last_detection_results", [])
-        should_run_detection = (
-            show_detection
-            and pipeline is not None
-            and st.session_state.get("detection_available", False)
-            and (frame_idx - 1) % max(1, detection_interval) == 0
-        )
+            if pipeline and st.session_state.get("detection_available", False):
+                try:
+                    detection_results = pipeline.process_frame(raw_frame)
+                    draw_detections(frame, detection_results)
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("Detection failed on frame %d: %s", frame_idx, exc)
 
         saved_violations = 0
         repo = st.session_state.get("violation_repo")
         preprocessor = st.session_state.get("plate_preprocessor")
-        try:
-            (
-                frame,
-                detection_results,
-                saved_violations,
-                light_state,
-                time_remaining,
-            ) = _process_stream_frame(
-                frame=frame,
-                zone=zone,
-                traffic_light=traffic_light,
-                settings=settings,
-                pipeline=pipeline,
-                detector=st.session_state.get("plate_detector"),
-                repo=repo,
-                preprocessor=preprocessor,
-                show_detection=show_detection,
-                detection_available=st.session_state.get("detection_available", False),
-                show_zone_overlay=show_zone_overlay,
-                show_fps=show_fps,
-                fps=fps,
-                run_detection=should_run_detection,
-                cached_detection_results=cached_detection_results,
-            )
-            if should_run_detection:
-                st.session_state["last_detection_results"] = detection_results
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Frame processing failed on frame %d: %s", frame_idx, exc)
-            light_state = traffic_light.get_state().value
-            time_remaining = traffic_light.get_time_remaining()
+        recorded_cache = st.session_state.setdefault("recorded_plates_cache", set())
+
+        if repo is not None and detection_results:
+            for result in detection_results:
+                if not result.is_violation or result.plate_text == "unknown":
+                    continue
+
+                # Bỏ qua ngay lập tức nếu biển số này đã được ghi nhận trong phiên chạy này
+                if result.plate_text in recorded_cache:
+                    continue
+
+                det = result.detection
+                crop = det.crop(raw_frame)
+                processed_plate = None
+                if preprocessor is not None and crop.size > 0:
+                    processed = preprocessor.run_pipeline(crop)
+                    if processed.size > 0:
+                        processed_plate = processed
+                inserted_id = repo.record_violation(
+                    frame=raw_frame,
+                    detection=det,
+                    plate_text=result.plate_text,
+                    light_state=light_state,
+                    preprocessed_plate=processed_plate,
+                    polygon=zone.polygon,
+                    zone_id=zone.zone_id,
+                    confidence=det.confidence,
+                )
+                
+                # Thêm vào cache để tránh xử lý lặp lại ở các frame tiếp theo
+                recorded_cache.add(result.plate_text)
+                if inserted_id is not None:
+                    saved_violations += 1
 
         if saved_violations > 0:
             current_count = st.session_state.get("violation_count", 0)
             st.session_state["violation_count"] = current_count + saved_violations
+
+        draw_light_status(frame, light_state)
+        if show_fps:
+            draw_fps(frame, fps)
 
         display_frame = set_hd_resolution(frame, width=display_width)
         display_frame = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
 
         try:
             video_placeholder.image(display_frame, channels="RGB")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to render frame %d: %s", frame_idx, exc)
+        except Exception:  # noqa: BLE001
+            pass
         fps_display.metric("FPS", fps)
         frame_count_display.metric("Frame", f"{frame_idx}/{total_frames}")
         light_state_display.metric("Light State", light_state)
@@ -530,7 +511,7 @@ def main() -> None:
         )
 
         elapsed = time.perf_counter() - now
-        sleep_time = max(0.0, frame_interval - elapsed)
+        sleep_time = frame_interval - elapsed
         if sleep_time > 0:
             time.sleep(sleep_time)
 

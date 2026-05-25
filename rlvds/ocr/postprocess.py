@@ -40,9 +40,9 @@ def adjust_contrast(image: np.ndarray) -> np.ndarray:
 
 def preprocess_image(image: np.ndarray) -> np.ndarray:
     """Standard OCR preprocessing pipeline."""
-    upscaled = upscale_image(image)
-    denoised = denoise_image(upscaled)
-    return adjust_contrast(denoised)
+    denoised = denoise_image(image)
+    upscaled = upscale_image(denoised)
+    return adjust_contrast(upscaled)
 
 
 def clean_plate_text(raw_text: str) -> str:

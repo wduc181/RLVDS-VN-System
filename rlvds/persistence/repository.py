@@ -30,26 +30,17 @@ logger = get_logger(__name__)
 class ViolationRepository(BaseRepository):
     """Data access layer for violations in SQLite."""
 
-    def __init__(
-        self,
-        database: Database,
-        violations_dir: str | None = None,
-        debug: bool | None = None,
-    ) -> None:
+    def __init__(self, database: Database, violations_dir: str | None = None) -> None:
         self._db = database
-        settings = get_settings()
         if violations_dir is None:
-            violations_dir = settings.paths.violations_dir
+            violations_dir = get_settings().paths.violations_dir
         self._base_dir = Path(violations_dir)
         self._scene_dir = self._base_dir / "scene"
         self._plate_dir = self._base_dir / "plate"
-        self._plate_debug_dir = self._base_dir / "plate_debug"
-        self._debug = settings.debug if debug is None else debug
         self._scene_dir.mkdir(parents=True, exist_ok=True)
         self._plate_dir.mkdir(parents=True, exist_ok=True)
         self._db.connect()
         self._db.create_tables()
-        self._db.migrate_schema()
 
     # ------------------------------------------------------------------
     # CRUD
@@ -66,7 +57,8 @@ class ViolationRepository(BaseRepository):
                 plate_text, violation_time, light_state, status,
                 full_image_path, plate_image_path, confidence, zone_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(plate_text) DO NOTHING;
             """,
             (
                 record.plate_text,
@@ -80,7 +72,7 @@ class ViolationRepository(BaseRepository):
             ),
         )
         if cur.rowcount == 0:
-            logger.warning("Insert affected 0 rows for plate: %s", record.plate_text)
+            logger.debug("Skip duplicate violation for plate: %s", record.plate_text)
             return None
         violation_id = int(cur.lastrowid)
         logger.info(
@@ -219,15 +211,15 @@ class ViolationRepository(BaseRepository):
         return row is not None
 
     def clean_data(self) -> int:
-        """Normalize plates, remove invalid records and deduplicate by (plate, time)."""
+        """Normalize plates, remove invalid records and deduplicate by plate."""
         rows = self._db.query_all(
             """
-            SELECT id, plate_text, violation_time
+            SELECT id, plate_text
             FROM violations
             ORDER BY id ASC;
             """
         )
-        seen: set[tuple[str, str]] = set()
+        seen: set[str] = set()
         ids_to_remove: list[int] = []
         updates: list[tuple[str, int]] = []
 
@@ -242,13 +234,11 @@ class ViolationRepository(BaseRepository):
                 ids_to_remove.append(int(row["id"]))
                 continue
 
-            violation_time = str(row["violation_time"] or "")
-            dedup_key = (normalized, violation_time)
-            if dedup_key in seen:
+            if normalized in seen:
                 ids_to_remove.append(int(row["id"]))
                 continue
 
-            seen.add(dedup_key)
+            seen.add(normalized)
             if normalized != raw_plate:
                 updates.append((normalized, int(row["id"])))
 
@@ -384,7 +374,6 @@ class ViolationRepository(BaseRepository):
         plate_text: str,
         light_state: str,
         preprocessed_plate: np.ndarray | None = None,
-        raw_plate: np.ndarray | None = None,
         polygon: np.ndarray | None = None,
         event_time: datetime | None = None,
     ) -> tuple[str, str]:
@@ -424,9 +413,6 @@ class ViolationRepository(BaseRepository):
 
         plate_img = self._build_plate_image(frame, detection, preprocessed_plate)
         self._safe_write(plate_path, plate_img)
-        if self._debug and raw_plate is not None and raw_plate.size > 0:
-            debug_path = (self._plate_debug_dir / f"{safe_plate}_{suffix}_raw.png").resolve()
-            self._safe_write(debug_path, raw_plate)
         return str(scene_path), str(plate_path)
 
     def record_violation(
@@ -437,7 +423,6 @@ class ViolationRepository(BaseRepository):
         plate_text: str,
         light_state: str,
         preprocessed_plate: np.ndarray | None = None,
-        raw_plate: np.ndarray | None = None,
         polygon: np.ndarray | None = None,
         zone_id: str = "default",
         status: str = "VIOLATION",
@@ -461,7 +446,7 @@ class ViolationRepository(BaseRepository):
         )
         violation_id = self.save(rec)
         if violation_id is None:
-            logger.debug("record_violation skipped invalid plate: %s", plate_text)
+            logger.debug("record_violation skipped duplicated plate: %s", plate_text)
             return None
 
         full_image_path: str | None = None
@@ -473,7 +458,6 @@ class ViolationRepository(BaseRepository):
                 plate_text=plate_text,
                 light_state=light_state,
                 preprocessed_plate=preprocessed_plate,
-                raw_plate=raw_plate,
                 polygon=polygon,
                 event_time=event_time,
             )
@@ -529,11 +513,11 @@ class ViolationRepository(BaseRepository):
         if not candidate:
             return None
 
-        # Delegate to OCR postprocessing helpers to validate and format.
-        normalized = format_plate(candidate)
-        if not normalized or not check_valid_plate(normalized):
+        # Delegate to OCR postprocessing helper which encapsulates plate rules.
+        formatted = format_plate(candidate)
+        if not check_valid_plate(formatted):
             return None
-        return normalized
+        return formatted
     def _build_filters(
         self,
         *,
