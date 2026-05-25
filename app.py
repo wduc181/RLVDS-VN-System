@@ -7,6 +7,14 @@ Run:
 
 from __future__ import annotations
 
+import os
+# Force CPU thread limiting to prevent CPU starvation and keep FPS stable
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
 import time
 import warnings
 from pathlib import Path
@@ -67,6 +75,22 @@ def _cleanup_video_source() -> None:
             st.session_state.get("frame_idx", 0),
         )
 
+    cached_pipeline = st.session_state.pop("cached_pipeline", None)
+    if cached_pipeline is not None and hasattr(cached_pipeline, "close"):
+        try:
+            cached_pipeline.close()
+        except Exception as exc:
+            logger.warning("Error while closing cached pipeline: %s", exc)
+
+    ocr_proc = st.session_state.pop("ocr_server_proc", None)
+    if ocr_proc is not None:
+        logger.info("Terminating background OCR Microservice process...")
+        try:
+            ocr_proc.terminate()
+            ocr_proc.wait(timeout=2)
+        except Exception as exc:
+            logger.warning("Error while terminating background OCR process: %s", exc)
+
     for key in (
         "frame_idx",
         "total_frames",
@@ -80,6 +104,7 @@ def _cleanup_video_source() -> None:
         "detection_available",
         "violation_repo",
         "plate_preprocessor",
+        "recorded_plates_cache",
     ):
         st.session_state.pop(key, None)
     st.session_state.pop("frame_idx", None)
@@ -91,7 +116,6 @@ def _cleanup_video_source() -> None:
     st.session_state.pop("frame_buffer", None)
     st.session_state.pop("violation_count", None)
     st.session_state.pop("mini_pipeline", None)
-    st.session_state.pop("cached_pipeline", None)
     st.session_state.pop("detection_available", None)
 
 
@@ -204,6 +228,56 @@ def main() -> None:
     if st.session_state.pop("should_start", False) and source_path:
         _cleanup_video_source()
 
+        # Khởi chạy OCR Microservice độc lập ẩn GPU
+        import subprocess
+        import sys
+        import urllib.request
+        import urllib.error
+
+        server_online = False
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:8502", timeout=0.2) as _:
+                server_online = True
+        except urllib.error.HTTPError:
+            server_online = True
+        except Exception:
+            server_online = False
+
+        if not server_online:
+            logger.info("Starting background OCR Microservice process...")
+            env = {**os.environ, "CUDA_VISIBLE_DEVICES": ""}
+            proc = subprocess.Popen(
+                [sys.executable, "rlvds/ocr/ocr_server.py"],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            st.session_state["ocr_server_proc"] = proc
+            
+            # Polling check (tối đa 10 giây) để đợi OCR Server khởi động hoàn tất
+            status_text = st.empty()
+            status_text.info("Đang khởi động OCR Microservice chạy ngầm trên CPU...")
+            for _ in range(20):
+                time.sleep(0.5)
+                try:
+                    with urllib.request.urlopen("http://127.0.0.1:8502", timeout=0.2) as _:
+                        server_online = True
+                        break
+                except urllib.error.HTTPError:
+                    server_online = True
+                    break
+                except Exception:
+                    pass
+            
+            if server_online:
+                status_text.success("OCR Microservice đã sẵn sàng!")
+                time.sleep(0.5)
+                status_text.empty()
+            else:
+                status_text.warning("Không kết nối được với OCR Microservice. Sẽ tự động dùng CPU cục bộ.")
+                time.sleep(1.0)
+                status_text.empty()
+
         try:
             src = VideoSource(source_path)
         except (FileNotFoundError, RuntimeError) as exc:
@@ -224,6 +298,7 @@ def main() -> None:
         st.session_state["violation_detector"] = violation_detector
         st.session_state["frame_buffer"] = frame_buffer
         st.session_state["violation_count"] = 0
+        st.session_state["recorded_plates_cache"] = set()
 
         try:
             db = Database(settings.database.url)
@@ -270,11 +345,13 @@ def main() -> None:
                     cache=plate_cache,
                     crop_expand_ratio=settings.preprocessing.expand_ratio,
                     ocr_quality_frames=settings.ocr_cache.ocr_quality_frames,
+                    async_ocr=settings.ocr_cache.async_ocr,
                 )
                 st.session_state["cached_pipeline"] = pipeline
-                logger.info("CachedPipeline initialized (iou_thresh=%.2f, ttl=%d)",
+                logger.info("CachedPipeline initialized (iou_thresh=%.2f, ttl=%d, async_ocr=%s)",
                             settings.ocr_cache.iou_threshold,
-                            settings.ocr_cache.cache_ttl_frames)
+                            settings.ocr_cache.cache_ttl_frames,
+                            settings.ocr_cache.async_ocr)
             else:
                 pipeline = MiniPipeline(
                     detector=detector,
@@ -332,12 +409,9 @@ def main() -> None:
             st.session_state["running"] = False
             video_placeholder.success(f"Completed - processed {frame_idx} frames.")
             break
-        # Only perform an expensive full-frame copy when detection or persistence is enabled.
-        if st.session_state.get("enable_detection", False) or st.session_state.get("enable_persistence", False):
-            raw_frame = frame.copy()
-        else:
-            # When both are disabled, avoid the copy and just reference the current frame.
-            raw_frame = frame
+        # Always copy the raw frame for clean detection and OCR crops.
+        # This prevents zone overlays and bounding boxes from polluting the OCR input.
+        raw_frame = frame.copy()
 
         now = time.perf_counter()
         dt = now - prev_time
@@ -370,7 +444,7 @@ def main() -> None:
             )
             if pipeline and st.session_state.get("detection_available", False):
                 try:
-                    detection_results = pipeline.process_frame(frame)
+                    detection_results = pipeline.process_frame(raw_frame)
                     draw_detections(frame, detection_results)
                 except Exception as exc:  # noqa: BLE001
                     logger.error("Detection failed on frame %d: %s", frame_idx, exc)
@@ -378,10 +452,17 @@ def main() -> None:
         saved_violations = 0
         repo = st.session_state.get("violation_repo")
         preprocessor = st.session_state.get("plate_preprocessor")
+        recorded_cache = st.session_state.setdefault("recorded_plates_cache", set())
+
         if repo is not None and detection_results:
             for result in detection_results:
                 if not result.is_violation or result.plate_text == "unknown":
                     continue
+
+                # Bỏ qua ngay lập tức nếu biển số này đã được ghi nhận trong phiên chạy này
+                if result.plate_text in recorded_cache:
+                    continue
+
                 det = result.detection
                 crop = det.crop(raw_frame)
                 processed_plate = None
@@ -399,6 +480,9 @@ def main() -> None:
                     zone_id=zone.zone_id,
                     confidence=det.confidence,
                 )
+                
+                # Thêm vào cache để tránh xử lý lặp lại ở các frame tiếp theo
+                recorded_cache.add(result.plate_text)
                 if inserted_id is not None:
                     saved_violations += 1
 

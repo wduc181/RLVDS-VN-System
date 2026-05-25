@@ -13,7 +13,7 @@ import numpy as np
 
 from config.settings import get_settings
 from rlvds.core.base import BaseRepository, Detection, Violation
-from rlvds.ocr.postprocess import check_valid_plate
+from rlvds.ocr.postprocess import check_valid_plate, format_plate
 from rlvds.persistence.database import Database
 from rlvds.persistence.models import (
     DailyStat,
@@ -514,10 +514,10 @@ class ViolationRepository(BaseRepository):
             return None
 
         # Delegate to OCR postprocessing helper which encapsulates plate rules.
-        normalized = check_valid_plate(candidate)
-        if not normalized:
+        formatted = format_plate(candidate)
+        if not check_valid_plate(formatted):
             return None
-        return normalized
+        return formatted
     def _build_filters(
         self,
         *,

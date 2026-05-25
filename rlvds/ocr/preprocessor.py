@@ -257,9 +257,9 @@ class PlatePreprocessor:
         if image is None or image.size == 0:
             return np.empty((0, 0), dtype=np.uint8)
 
-        upscaled = self.upscale(image)
-        denoised = self.denoise(upscaled)
-        return self.apply_clahe(denoised)
+        denoised = self.denoise(image)
+        upscaled = self.upscale(denoised)
+        return self.apply_clahe(upscaled)
 
     def run(self, frame: np.ndarray, detection: Detection) -> np.ndarray:
         """Pipeline đầy đủ: crop → upscale → denoise → CLAHE.
