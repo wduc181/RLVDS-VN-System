@@ -64,6 +64,7 @@ Ghi chú:
 - Repo chưa có `pyproject.toml` cho formatter/linter ở root.
 - Dependency nặng gồm Torch, PaddleOCR, OpenCV. Test unit hiện dùng nhiều fake object, nên thường không cần model thật.
 - Docker Compose chạy Streamlit ở `http://localhost:8501`, mount `data/samples` và `weights` read-only, SQLite nằm trong tmpfs `/tmp/rlvds` nên mất khi container bị xóa.
+- Hãy sử dụng mỗi trường conda "lpr_env"
 
 ## Invariant kỹ thuật quan trọng
 

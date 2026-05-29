@@ -7,6 +7,7 @@ Run:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import os
 # Force CPU thread limiting to prevent CPU starvation and keep FPS stable
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -57,6 +58,14 @@ from rlvds.ocr.recognizer import LicensePlateOCR
 logger = get_logger(__name__)
 
 
+@dataclass
+class ImageOCRResult:
+    detection: Any
+    plate_text: str
+    ocr_confidence: float
+    crop: np.ndarray
+
+
 def _crop_plate_for_ocr(
     detector: Any,
     detection: Any,
@@ -66,6 +75,123 @@ def _crop_plate_for_ocr(
     if detector is not None and hasattr(detector, "crop_plate"):
         return detector.crop_plate(detection, frame, expand_ratio=expand_ratio)
     return detection.crop(frame)
+
+
+def _decode_uploaded_image(uploaded_file: Any) -> np.ndarray | None:
+    if uploaded_file is None:
+        return None
+    image_bytes = uploaded_file.getvalue()
+    if not image_bytes:
+        return None
+    encoded = np.frombuffer(image_bytes, dtype=np.uint8)
+    image = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+    if image is None or image.size == 0:
+        return None
+    return image
+
+
+def _run_ocr_with_confidence(ocr_engine: Any, crop: np.ndarray) -> tuple[str, float]:
+    if crop is None or crop.size == 0 or ocr_engine is None:
+        return "unknown", 0.0
+    if hasattr(ocr_engine, "recognize_with_confidence"):
+        result = ocr_engine.recognize_with_confidence(crop)
+        return str(getattr(result, "text", "unknown")), float(
+            getattr(result, "confidence", 0.0)
+        )
+    if hasattr(ocr_engine, "recognize"):
+        return str(ocr_engine.recognize(crop)), 0.0
+    return "unknown", 0.0
+
+
+def _process_uploaded_image(
+    *,
+    raw_image: np.ndarray,
+    detector: Any,
+    ocr_engine: Any,
+    settings: Any,
+) -> tuple[np.ndarray, list[ImageOCRResult]]:
+    """Detect and OCR plates from an uploaded raw BGR image."""
+    display_image = raw_image.copy()
+    detections = detector.detect(raw_image) if detector is not None else []
+    results: list[ImageOCRResult] = []
+
+    for detection in detections:
+        crop = _crop_plate_for_ocr(
+            detector,
+            detection,
+            raw_image,
+            settings.preprocessing.expand_ratio,
+        )
+        plate_text, ocr_confidence = _run_ocr_with_confidence(ocr_engine, crop)
+        results.append(
+            ImageOCRResult(
+                detection=detection,
+                plate_text=plate_text,
+                ocr_confidence=ocr_confidence,
+                crop=crop,
+            )
+        )
+
+        x1, y1, x2, y2 = detection.bbox
+        label = f"{int(detection.confidence * 100)}%"
+        if plate_text and plate_text.lower() != "unknown":
+            label = f"{plate_text} ({int(ocr_confidence * 100)}%)"
+        cv2.rectangle(display_image, (x1, y1), (x2, y2), (255, 0, 0), 2)
+        cv2.putText(
+            display_image,
+            label,
+            (x1, max(y1 - 10, 20)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 0),
+            2,
+            cv2.LINE_AA,
+        )
+
+    return display_image, results
+
+
+def _get_image_ocr_components(
+    settings: Any,
+) -> tuple[LicensePlateDetector | None, LicensePlateOCR | None, bool]:
+    detector = st.session_state.get("image_ocr_detector")
+    ocr_engine = st.session_state.get("image_ocr_engine")
+
+    if detector is None:
+        try:
+            detector = LicensePlateDetector(
+                model_path=settings.detection.model_path,
+                confidence_threshold=settings.detection.confidence_threshold,
+                iou_threshold=settings.detection.iou_threshold,
+                image_size=settings.detection.image_size,
+                device=settings.detection.device,
+            )
+            st.session_state["image_ocr_detector"] = detector
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to initialize image detector: %s", exc)
+            detector = None
+
+    if ocr_engine is None:
+        try:
+            ocr_engine = LicensePlateOCR(
+                lang=settings.ocr.lang,
+                use_gpu=settings.ocr.use_gpu,
+                confidence_threshold=settings.ocr.confidence_threshold,
+            )
+            st.session_state["image_ocr_engine"] = ocr_engine
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to initialize image OCR engine: %s", exc)
+            ocr_engine = None
+
+    detection_available = bool(
+        detector is not None
+        and (
+            detector.is_available()
+            if hasattr(detector, "is_available")
+            else True
+        )
+    )
+    return detector, ocr_engine, detection_available
 
 
 def _recorded_violation_key(result: Any) -> tuple[str, Any]:
@@ -255,14 +381,85 @@ def _build_runtime_components() -> tuple[ViolationZone, TrafficLightFSM, Violati
     return zone, traffic_light, violation_detector, frame_buffer
 
 
+def _render_image_ocr_tab(settings: Any) -> None:
+    uploaded_file = st.file_uploader(
+        "Upload traffic image",
+        type=("jpg", "jpeg", "png"),
+        accept_multiple_files=False,
+    )
+    raw_image = _decode_uploaded_image(uploaded_file)
+
+    if uploaded_file is not None and raw_image is None:
+        st.error("Cannot decode uploaded image. Please use a valid JPG or PNG file.")
+        return
+
+    if raw_image is None:
+        st.info("Upload a traffic image to detect and read license plates.")
+        return
+
+    st.image(cv2.cvtColor(raw_image, cv2.COLOR_BGR2RGB), channels="RGB")
+    if not st.button("Đọc biển số", type="primary"):
+        return
+
+    detector, ocr_engine, detection_available = _get_image_ocr_components(settings)
+    if not detection_available or detector is None:
+        st.warning("Detection model is not available. Check detection.model_path.")
+        return
+    if ocr_engine is None:
+        st.warning("OCR engine is not available.")
+        return
+
+    with st.spinner("Đang phát hiện và đọc biển số..."):
+        display_image, results = _process_uploaded_image(
+            raw_image=raw_image,
+            detector=detector,
+            ocr_engine=ocr_engine,
+            settings=settings,
+        )
+
+    st.image(cv2.cvtColor(display_image, cv2.COLOR_BGR2RGB), channels="RGB")
+    if not results:
+        st.info("No license plate detected in the uploaded image.")
+        return
+
+    st.dataframe(
+        [
+            {
+                "plate_text": result.plate_text,
+                "ocr_confidence": round(result.ocr_confidence, 3),
+                "detection_confidence": round(result.detection.confidence, 3),
+                "bbox": result.detection.bbox,
+            }
+            for result in results
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    crop_columns = st.columns(min(len(results), 4))
+    for idx, result in enumerate(results):
+        if result.crop.size == 0:
+            continue
+        with crop_columns[idx % len(crop_columns)]:
+            st.image(
+                cv2.cvtColor(result.crop, cv2.COLOR_BGR2RGB),
+                channels="RGB",
+                caption=result.plate_text,
+            )
+
+
 def main() -> None:
     if st is None:
         raise RuntimeError("Streamlit is required to run app.py")
 
     st.set_page_config(page_title="RLVDS-VN", layout="wide")
-    st.title("RLVDS-VN - Video Stream Test")
+    st.title("RLVDS-VN")
 
     settings = get_settings()
+    video_tab, image_tab = st.tabs(["Video Stream", "Image OCR"])
+
+    with image_tab:
+        _render_image_ocr_tab(settings)
 
     with st.sidebar:
         st.header("Video Source")
@@ -330,14 +527,16 @@ def main() -> None:
             on_click=lambda: st.session_state.update(running=False),
         )
 
-    video_placeholder = st.empty()
-    metrics_col1, metrics_col2, metrics_col3, metrics_col4, metrics_col5 = st.columns(5)
+    video_placeholder = video_tab.empty()
+    metrics_col1, metrics_col2, metrics_col3, metrics_col4, metrics_col5 = (
+        video_tab.columns(5)
+    )
     fps_display = metrics_col1.empty()
     frame_count_display = metrics_col2.empty()
     resolution_display = metrics_col3.empty()
     light_state_display = metrics_col4.empty()
     timer_display = metrics_col5.empty()
-    violation_count_display = st.empty()
+    violation_count_display = video_tab.empty()
 
     if st.session_state.pop("should_start", False) and source_path:
         _cleanup_video_source()
@@ -369,7 +568,7 @@ def main() -> None:
             st.session_state["ocr_server_proc"] = proc
             
             # Polling check (tối đa 10 giây) để đợi OCR Server khởi động hoàn tất
-            status_text = st.empty()
+            status_text = video_tab.empty()
             status_text.info("Đang khởi động OCR Microservice chạy ngầm trên CPU...")
             for _ in range(20):
                 time.sleep(0.5)
@@ -395,7 +594,7 @@ def main() -> None:
         try:
             src = VideoSource(source_path)
         except (FileNotFoundError, RuntimeError) as exc:
-            st.error(f"Cannot open video source: {exc}")
+            video_tab.error(f"Cannot open video source: {exc}")
             return
 
         w, h = src.get_frame_size()
