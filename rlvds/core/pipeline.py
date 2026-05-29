@@ -161,7 +161,10 @@ class Pipeline:
         if self.db is not None:
             self.db.disconnect()
             self.db = None
-        cv2.destroyAllWindows()
+        try:
+            cv2.destroyAllWindows()
+        except cv2.error as exc:
+            logger.debug("OpenCV window cleanup skipped: %s", exc)
         logger.info("Pipeline stopped")
 
     def _start(self, source: str | int) -> None:
