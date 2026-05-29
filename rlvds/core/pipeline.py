@@ -231,7 +231,7 @@ class Pipeline:
             return 0
         saved = 0
         for result in results:
-            if not result.is_violation or result.plate_text == "unknown":
+            if not result.is_violation:
                 continue
             det = result.detection
             crop = self.detector.crop_plate(

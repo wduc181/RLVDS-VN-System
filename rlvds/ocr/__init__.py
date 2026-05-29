@@ -9,13 +9,14 @@ from rlvds.ocr.postprocess import (
     preprocess_image,
     upscale_image,
 )
-from rlvds.ocr.preprocessor import PlatePreprocessor
+from rlvds.ocr.preprocessor import PlatePreprocessor, prepare_paddle_ocr_input
 from rlvds.ocr.recognizer import LicensePlateOCR, YOLOv5CharOCR
 
 __all__ = [
     "LicensePlateOCR",
     "YOLOv5CharOCR",
     "PlatePreprocessor",
+    "prepare_paddle_ocr_input",
     "upscale_image",
     "denoise_image",
     "adjust_contrast",

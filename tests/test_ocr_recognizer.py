@@ -10,6 +10,7 @@ from rlvds.ocr.recognizer import (
     check_point_linear,
     linear_equation,
 )
+from rlvds.ocr.preprocessor import prepare_paddle_ocr_input
 
 
 class _FakePreprocessor:
@@ -23,6 +24,11 @@ class _FakePaddleEngine:
 
     def ocr(self, _image):
         return self._result
+
+
+class _RaisingPaddleEngine:
+    def ocr(self, _image):
+        raise RuntimeError("ocr failed")
 
 
 class _FakeValues:
@@ -91,6 +97,47 @@ def test_license_plate_ocr_rejects_low_confidence_text() -> None:
     image = np.ones((24, 80, 3), dtype=np.uint8) * 255
     result = ocr.recognize_with_confidence(image)
     assert result.text == "unknown"
+
+
+def test_license_plate_ocr_rejects_invalid_high_confidence_text() -> None:
+    fake_result = [
+        [
+            [[[0, 0], [1, 0], [1, 1], [0, 1]], ("ABC", 0.95)],
+        ]
+    ]
+    ocr = LicensePlateOCR(
+        ocr_engine=_FakePaddleEngine(result=fake_result),
+        confidence_threshold=0.8,
+        preprocessor=_FakePreprocessor(),
+    )
+    image = np.ones((16, 50, 3), dtype=np.uint8) * 255
+
+    result = ocr.recognize_with_confidence(image)
+
+    assert result == OCRResult(text="unknown", confidence=0.0)
+
+
+def test_license_plate_ocr_returns_unknown_when_engine_raises() -> None:
+    ocr = LicensePlateOCR(
+        ocr_engine=_RaisingPaddleEngine(),
+        confidence_threshold=0.8,
+        preprocessor=_FakePreprocessor(),
+    )
+    image = np.ones((16, 50, 3), dtype=np.uint8) * 255
+
+    result = ocr.recognize_with_confidence(image)
+
+    assert result == OCRResult(text="unknown", confidence=0.0)
+
+
+def test_prepare_paddle_ocr_input_upscales_small_crop_and_adds_padding() -> None:
+    image = np.ones((12, 40, 3), dtype=np.uint8) * 127
+
+    prepared = prepare_paddle_ocr_input(image, min_width=160, min_height=48, padding=8)
+
+    assert prepared.shape[0] >= 64
+    assert prepared.shape[1] >= 176
+    assert prepared.shape[2] == 3
 
 
 def test_license_plate_ocr_parses_single_entry_structure() -> None:

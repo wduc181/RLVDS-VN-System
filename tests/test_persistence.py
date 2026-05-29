@@ -11,7 +11,12 @@ import pytest
 
 from rlvds.core.base import Detection
 from rlvds.persistence.database import Database
-from rlvds.persistence.models import ViolationCreate, ViolationRecord, ViolationUpdate
+from rlvds.persistence.models import (
+    OCR_FAILED_STATUS,
+    ViolationCreate,
+    ViolationRecord,
+    ViolationUpdate,
+)
 from rlvds.persistence.repository import ViolationRepository
 
 
@@ -141,6 +146,30 @@ def test_record_violation_saves_both_images_and_paths(tmp_path: Path) -> None:
     )
     assert second is not None
     assert repo.count() == 2
+
+
+def test_record_violation_saves_ocr_failed_evidence(tmp_path: Path) -> None:
+    repo = _build_repo(tmp_path)
+    frame = np.zeros((120, 180, 3), dtype=np.uint8)
+    det = Detection(bbox=(30, 40, 90, 70), confidence=0.77)
+    event_time = datetime(2026, 3, 25, 12, 0, 0)
+
+    violation_id = repo.record_violation(
+        frame=frame,
+        detection=det,
+        plate_text="unknown",
+        light_state="RED",
+        raw_plate=frame[40:70, 30:90],
+        event_time=event_time,
+    )
+
+    assert violation_id is not None
+    stored = repo.get_by_id(violation_id)
+    assert stored is not None
+    assert stored.status == OCR_FAILED_STATUS
+    assert stored.plate_text.startswith("OCR_FAILED_20260325_120000_000000_30_40_90_70")
+    assert Path(stored.full_image_path).exists()
+    assert Path(stored.plate_image_path).exists()
 
 
 def test_record_violation_does_not_save_raw_debug_crop_by_default(tmp_path: Path) -> None:
@@ -356,6 +385,25 @@ def test_clean_data_removes_invalid_and_normalized_duplicates(tmp_path: Path) ->
     # Only INVALID plate removed; the two 30A entries have different violation_times
     assert removed == 1
     assert repo.count() == 2
+
+
+def test_clean_data_preserves_ocr_failed_records(tmp_path: Path) -> None:
+    repo = _build_repo(tmp_path)
+    repo.save(
+        ViolationRecord(
+            plate_text="OCR_FAILED_20260325_120000_000000_1_2_3_4",
+            violation_time="2026-03-25T12:00:00",
+            light_state="RED",
+            status=OCR_FAILED_STATUS,
+            confidence=0.7,
+            zone_id="z1",
+        )
+    )
+
+    removed = repo.clean_data()
+
+    assert removed == 0
+    assert repo.count(status=OCR_FAILED_STATUS) == 1
 
 
 def test_export_csv_with_filters_returns_written_rows(tmp_path: Path) -> None:

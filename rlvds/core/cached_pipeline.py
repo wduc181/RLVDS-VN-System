@@ -254,11 +254,6 @@ class CachedPipeline:
         if crop.size == 0:
             return
 
-        # Bỏ qua nếu kích thước biển số crop quá nhỏ (tránh xử lý nhiễu/false positives)
-        h, w = crop.shape[:2]
-        if w < 20 or h < 10:
-            return
-
         cached_id = id(cached)
         with self._lock:
             self._pending_jobs.add(cached_id)
@@ -309,11 +304,6 @@ class CachedPipeline:
             expand_ratio=self._crop_expand_ratio,
         )
         if crop.size == 0:
-            return "unknown", 0.0
-
-        # Bỏ qua nếu kích thước biển số crop quá nhỏ (tránh xử lý nhiễu/false positives)
-        h, w = crop.shape[:2]
-        if w < 20 or h < 10:
             return "unknown", 0.0
 
         result = self._ocr.recognize_with_confidence(crop)

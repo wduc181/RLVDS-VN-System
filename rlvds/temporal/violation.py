@@ -58,9 +58,6 @@ class ViolationDetector:
         Recorded plates are cleared when light cycles to GREEN so the same
         plate can violate again in future red-light cycles.
         """
-        if not plate_text or plate_text == "unknown":
-            return False
-
         current_state = self._traffic_light.get_state()
         if current_state != self._prev_light_state:
             if current_state == LightState.GREEN:
@@ -73,7 +70,7 @@ class ViolationDetector:
 
         in_zone = self._zone.is_in_zone(detection.get_anchor_point())
         if in_zone:
-            logger.info("[MOCK] Violation plate=%s zone=%s", plate_text, self._zone_id)
+            logger.info("[MOCK] Violation plate=%s zone=%s", plate_text or "unknown", self._zone_id)
             return True
         return False
 
@@ -136,8 +133,6 @@ def mock_violation_check(
     traffic_light: TrafficLightFSM,
 ) -> bool:
     """Standalone helper for quick testing without full class wiring."""
-    if not plate_text or plate_text == "unknown":
-        return False
     if not traffic_light.is_red():
         return False
 

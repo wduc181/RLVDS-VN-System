@@ -50,6 +50,47 @@ from rlvds.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def prepare_paddle_ocr_input(
+    image: np.ndarray,
+    *,
+    min_width: int = 160,
+    min_height: int = 48,
+    max_scale: float = 4.0,
+    padding: int = 8,
+) -> np.ndarray:
+    """Prepare a small plate crop for PaddleOCR text detection/recognition."""
+    if image is None or image.size == 0:
+        return np.empty((0, 0, 3), dtype=np.uint8)
+
+    prepared = image
+    if len(prepared.shape) == 2:
+        prepared = cv2.cvtColor(prepared, cv2.COLOR_GRAY2BGR)
+    elif prepared.shape[2] == 4:
+        prepared = cv2.cvtColor(prepared, cv2.COLOR_BGRA2BGR)
+
+    h, w = prepared.shape[:2]
+    if h <= 0 or w <= 0:
+        return np.empty((0, 0, 3), dtype=np.uint8)
+
+    scale = max(min_width / float(w), min_height / float(h), 1.0)
+    scale = min(scale, max_scale)
+    if scale > 1.0:
+        new_w = max(1, int(round(w * scale)))
+        new_h = max(1, int(round(h * scale)))
+        prepared = cv2.resize(prepared, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+
+    if padding > 0:
+        prepared = cv2.copyMakeBorder(
+            prepared,
+            padding,
+            padding,
+            padding,
+            padding,
+            borderType=cv2.BORDER_REPLICATE,
+        )
+    return prepared
+
+
 class PlatePreprocessor:
     """Tiền xử lý ảnh biển số trước khi OCR.
 

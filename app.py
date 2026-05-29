@@ -68,6 +68,13 @@ def _crop_plate_for_ocr(
     return detection.crop(frame)
 
 
+def _recorded_violation_key(result: Any) -> tuple[str, Any]:
+    plate_text = str(getattr(result, "plate_text", "") or "").strip()
+    if plate_text and plate_text.lower() != "unknown":
+        return ("plate", plate_text)
+    return ("ocr_failed", tuple(getattr(result.detection, "bbox", ())))
+
+
 def _process_stream_frame(
     *,
     frame: np.ndarray,
@@ -119,7 +126,7 @@ def _process_stream_frame(
     saved_violations = 0
     if did_run_detection and repo is not None and detection_results:
         for result in detection_results:
-            if not result.is_violation or result.plate_text == "unknown":
+            if not result.is_violation:
                 continue
             det = result.detection
             crop = _crop_plate_for_ocr(
@@ -566,11 +573,12 @@ def main() -> None:
 
         if repo is not None and detection_results:
             for result in detection_results:
-                if not result.is_violation or result.plate_text == "unknown":
+                if not result.is_violation:
                     continue
 
-                # Bỏ qua ngay lập tức nếu biển số này đã được ghi nhận trong phiên chạy này
-                if result.plate_text in recorded_cache:
+                # Bỏ qua nếu vi phạm này đã được ghi nhận trong phiên chạy hiện tại.
+                cache_key = _recorded_violation_key(result)
+                if cache_key in recorded_cache:
                     continue
 
                 det = result.detection
@@ -596,10 +604,9 @@ def main() -> None:
                     zone_id=zone.zone_id,
                     confidence=det.confidence,
                 )
-                
-                # Thêm vào cache để tránh xử lý lặp lại ở các frame tiếp theo
-                recorded_cache.add(result.plate_text)
                 if inserted_id is not None:
+                    # Thêm vào cache để tránh xử lý lặp lại ở các frame tiếp theo
+                    recorded_cache.add(cache_key)
                     saved_violations += 1
 
         if saved_violations > 0:

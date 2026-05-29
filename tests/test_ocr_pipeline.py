@@ -86,6 +86,22 @@ def test_mock_violation_check_true_when_red_and_inside_zone() -> None:
     assert ok is True
 
 
+def test_mock_violation_check_true_even_when_ocr_unknown() -> None:
+    zone = ViolationZone(vertices=[[0, 0], [100, 0], [100, 100], [0, 100]])
+    fsm = TrafficLightFSM(red_sec=30, green_sec=30, yellow_sec=3, initial_state="RED")
+    fsm.start()
+    det = Detection(bbox=(10, 10, 50, 60), confidence=0.9)
+
+    ok = mock_violation_check(
+        plate_text="unknown",
+        detection=det,
+        zone=zone,
+        traffic_light=fsm,
+    )
+
+    assert ok is True
+
+
 def test_mini_pipeline_detect_to_ocr_to_violation() -> None:
     zone = ViolationZone(vertices=[[0, 0], [100, 0], [100, 100], [0, 100]])
     fsm = TrafficLightFSM(red_sec=30, green_sec=30, yellow_sec=3, initial_state="RED")

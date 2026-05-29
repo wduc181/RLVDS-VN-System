@@ -280,6 +280,18 @@ class TestCachedPipeline:
         assert results[0].from_cache is False
         assert ocr.call_count == 1
 
+    def test_small_low_resolution_crop_still_reaches_ocr(self) -> None:
+        """Small distant plate crops should be upscaled by OCR, not skipped early."""
+        ocr = _CountingOCR()
+        detector = _FakeDetector([Detection(bbox=(10, 10, 25, 18), confidence=0.9)])
+        pipeline = _make_pipeline(ocr=ocr, detector=detector)
+        frame = np.ones((60, 80, 3), dtype=np.uint8) * 128
+
+        results = pipeline.process_frame(frame)
+
+        assert results[0].plate_text == "30A-12345"
+        assert ocr.call_count == 1
+
     def test_second_frame_skips_ocr(self) -> None:
         """Same bbox in second frame uses cache (skip OCR)."""
         ocr = _CountingOCR()

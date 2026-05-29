@@ -19,6 +19,8 @@ from socketserver import ThreadingMixIn
 import numpy as np
 import cv2
 
+from rlvds.ocr.preprocessor import prepare_paddle_ocr_input
+
 # Force CPU-only for PaddleOCR to avoid GPU/CUDA conflicts
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
@@ -56,8 +58,8 @@ class OCRRequestHandler(BaseHTTPRequestHandler):
             self._send_response(None)
             return
 
-        # Run OCR directly on raw image — PaddleOCR handles its own
-        # internal preprocessing (resize, normalization, etc.)
+        img = prepare_paddle_ocr_input(img)
+
         try:
             result = ocr_engine.ocr(img)
             self._send_response(result)

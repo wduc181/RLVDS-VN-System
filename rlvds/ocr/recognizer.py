@@ -9,8 +9,8 @@ import numpy as np
 
 from rlvds.core.base import BaseOCR
 from config.settings import get_settings
-from rlvds.ocr.postprocess import clean_plate_text, format_plate
-from rlvds.ocr.preprocessor import PlatePreprocessor
+from rlvds.ocr.postprocess import check_valid_plate, clean_plate_text, format_plate
+from rlvds.ocr.preprocessor import PlatePreprocessor, prepare_paddle_ocr_input
 from rlvds.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -73,7 +73,8 @@ class LicensePlateOCR(BaseOCR):
             import json
             import cv2
 
-            success, encoded_img = cv2.imencode('.jpg', image)
+            ocr_image = prepare_paddle_ocr_input(image)
+            success, encoded_img = cv2.imencode(".png", ocr_image)
             if success:
                 req_data = encoded_img.tobytes()
                 try:
@@ -90,7 +91,7 @@ class LicensePlateOCR(BaseOCR):
                         if parsed is None:
                             return OCRResult(text="unknown", confidence=0.0)
                         text = format_plate(parsed.text)
-                        if not text:
+                        if not text or not check_valid_plate(text):
                             return OCRResult(text="unknown", confidence=0.0)
                         return OCRResult(text=text, confidence=parsed.confidence)
                 except Exception as e:
@@ -103,14 +104,18 @@ class LicensePlateOCR(BaseOCR):
             logger.warning("PaddleOCR engine unavailable; returning unknown")
             return OCRResult(text="unknown", confidence=0.0)
 
-        processed = self.preprocess(image)
-        result = self._ocr.ocr(processed)
+        processed = prepare_paddle_ocr_input(self.preprocess(image))
+        try:
+            result = self._ocr.ocr(processed)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("PaddleOCR inference failed: %s", exc)
+            return OCRResult(text="unknown", confidence=0.0)
         parsed = self._parse_paddle_result(result)
         if parsed is None:
             return OCRResult(text="unknown", confidence=0.0)
 
         text = format_plate(parsed.text)
-        if not text:
+        if not text or not check_valid_plate(text):
             return OCRResult(text="unknown", confidence=0.0)
         return OCRResult(text=text, confidence=parsed.confidence)
 
