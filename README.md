@@ -1,122 +1,128 @@
 # RLVDS-VN: Vietnam Red Light Violation Detection System
 
-> **Note:** Đây là một **Learning Project** (Dự án học tập), được phát triển nhằm mục đích nghiên cứu và học tập.
+> **Note:** Đây là một learning project, được phát triển nhằm mục đích nghiên cứu và học tập về Computer Vision, OCR và thiết kế pipeline xử lý video.
 
-## Mô tả dự án
+RLVDS-VN là hệ thống phát hiện xe vượt đèn đỏ tại Việt Nam. Hệ thống đọc video/camera góc cố định, phát hiện biển số bằng YOLOv5, nhận diện ký tự bằng PaddleOCR, kiểm tra biển số có nằm trong vùng vi phạm khi đèn đỏ hay không, rồi lưu bằng chứng vào SQLite.
 
-Hệ thống thị giác máy tính tự động phát hiện hành vi **vượt đèn đỏ** và nhận diện biển số xe máy, ô tô tại Việt Nam dựa trên kết hợp giữa không gian (polygon) và thời gian (timing).
+## Tính năng chính
+
+- Phát hiện biển số bằng YOLOv5 custom weights.
+- OCR biển số bằng PaddleOCR, có thể chạy qua OCR microservice CPU để tránh xung đột CUDA/cuDNN.
+- Logic vi phạm dựa trên trạng thái đèn đỏ và anchor point của bbox nằm trong polygon giám sát.
+- Giao diện Streamlit cho video stream và upload ảnh OCR riêng lẻ.
+- Lưu record vi phạm, ảnh scene và ảnh biển số vào SQLite + thư mục evidence.
+- Cấu hình bằng YAML, `config/local.yaml` và env vars prefix `RLVDS_`.
 
 ## Công nghệ sử dụng
 
-| Thành phần | Công nghệ |
-|------------|-----------|
-| Ngôn ngữ | Python 3.10 |
-| Detection | YOLOv5 |
-| OCR | PaddleOCR (ppOCRv4) |
-| Tracking | SORT/ByteTrack |
-| Giao diện | Streamlit |
-| Database | SQLite |
-| Config | Pydantic + YAML |
+| Thành phần | Công nghệ | Vai trò |
+| --- | --- | --- |
+| Ngôn ngữ | Python 3.10 | Runtime chính |
+| Video/CV | OpenCV, NumPy | Đọc frame, crop, xử lý ảnh và vẽ overlay |
+| Detection | YOLOv5 qua `torch.hub.load` | Phát hiện bbox biển số |
+| OCR chính | PaddleOCR | Nhận diện text biển số |
+| OCR runtime | HTTP microservice CPU | Tách PaddleOCR khỏi process Streamlit/PyTorch khi chạy video |
+| OCR fallback | YOLOv5 character OCR | Nhận diện từng ký tự khi cần thay engine |
+| Spatial/Temporal | Polygon + TrafficLightFSM | Kiểm tra anchor point trong vùng vi phạm khi đèn đỏ |
+| OCR cache | IOU-based `PlateTrackCache` | Giảm số lần gọi OCR trên các frame liên tiếp |
+| UI | Streamlit | Video stream dashboard và tab Image OCR |
+| CLI | `main.py` | Chạy pipeline từ terminal |
+| Database | SQLite | Lưu record vi phạm và đường dẫn evidence |
+| Config | Pydantic Settings + YAML + env vars | Cấu hình type-safe, override bằng `RLVDS_` |
+| Tracking | SORT-style tracker | Module optional, chưa là điều kiện chính của violation flow |
+| Test | pytest | Unit tests cho detection, OCR, cache, polygon, persistence |
+| Container | Docker Compose | Chạy demo Streamlit tại `localhost:8501` |
 
 ## Cấu trúc dự án
 
-```
+```text
 RLVDS-VN-System/
-├── app.py                      # Streamlit UI entry point
-├── main.py                     # CLI/Pipeline entry point
-├── config/                     # Configuration
-│   ├── __init__.py
-│   ├── default.yaml            # Default config values
-│   └── settings.py             # Pydantic settings
-│
-├── rlvds/                      # Main Python package
-│   ├── core/                   # Core abstractions & pipeline
-│   │   ├── base.py             # Abstract base classes
-│   │   └── pipeline.py         # Pipeline orchestrator
-│   │
-│   ├── ingestion/              # Data Ingestion Layer
-│   │   ├── video_source.py     # Video/Camera input
-│   │   └── frame_buffer.py     # Frame buffering
-│   │
-│   ├── detection/              # Object Detection Layer
-│   │   ├── detector.py         # YOLOv5 detector
-│   │   └── models.py           # Detection dataclasses
-│   │
-│   ├── tracking/               # Object Tracking Layer
-│   │   ├── tracker.py          # Multi-object tracker
-│   │   └── track_state.py      # Track lifecycle
-│   │
-│   ├── spatial/                # Spatial Reasoning Layer
-│   │   ├── polygon.py          # Point-in-polygon
-│   │   ├── zones.py            # Violation zones
-│   │   └── calibration.py      # Camera calibration
-│   │
-│   ├── temporal/               # Temporal Logic Layer
-│   │   ├── traffic_light.py    # Traffic light FSM
-│   │   ├── timing.py           # Timing sync
-│   │   └── violation.py        # Violation detection
-│   │
-│   ├── ocr/                    # OCR Layer
-│   │   ├── recognizer.py       # PaddleOCR wrapper
-│   │   └── postprocess.py      # Text cleanup
-│   │
-│   ├── persistence/            # Persistence Layer
-│   │   ├── database.py         # SQLite operations
-│   │   ├── models.py           # Data models
-│   │   └── repository.py       # Data access
-│   │
-│   └── utils/                  # Utilities
-│       ├── logger.py           # Logging
-│       ├── visualization.py    # Drawing utils
-│       └── io.py               # File I/O
-│
-├── weights/                    # Model weights (.pt files)
-├── data/                       # Data storage
-│   ├── samples/                # Sample videos
-│   └── violations/             # Captured images
-├── tests/                      # Test suite
-├── docs/                       # Documentation
-└── requirements.txt            # Dependencies
+├── app.py                         # Streamlit UI: video stream + image OCR
+├── main.py                        # CLI entry point
+├── Dockerfile                     # Docker image cho Streamlit app
+├── docker-compose.yml             # Runtime demo tại localhost:8501
+├── requirements.txt               # Python dependencies
+├── config/
+│   ├── default.yaml               # Config mặc định
+│   └── settings.py                # Pydantic settings, YAML/env merge
+├── rlvds/
+│   ├── core/                      # Base dataclasses, Pipeline, MiniPipeline, CachedPipeline
+│   ├── ingestion/                 # VideoSource, FrameBuffer
+│   ├── detection/                 # YOLOv5 license plate detector
+│   ├── ocr/                       # PaddleOCR wrapper, OCR server, preprocessing, cache
+│   ├── spatial/                   # Polygon utilities, ViolationZone
+│   ├── temporal/                  # TrafficLightFSM, ViolationDetector
+│   ├── persistence/               # SQLite Database, models, repository
+│   ├── tracking/                  # SORT-style tracker, Kalman state, IOU matching
+│   └── utils/                     # Logger, visualization, IO helpers
+├── tests/                         # Unit tests
+├── docs/
+│   ├── ARCHITECTURE.md            # Kiến trúc kỹ thuật chi tiết
+│   ├── ProjectOverview.md         # Tổng quan project
+│   └── test_results/              # Ảnh kết quả test trong README
+├── training/                      # Notebook/config training, gồm YOLOv5 vendored upstream
+├── weights/                       # Model weights local, không commit
+└── data/                          # Sample video, SQLite DB, evidence local
 ```
 
-## Processing Pipeline
-
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                                  CameraAI                                    │
-├──────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  ┌─────────────┐  OpenCV   ┌─────────────┐  YOLOv5 Detect  ┌─────────────┐   │
-│  │   Video     │──────────▶│   Frame     │────────────────▶│   Plate     │   │
-│  │  Realtime   │           │   Image     │  License Plate  │   Image     │   │
-│  └─────────────┘           └──────┬──────┘                 └──────┬──────┘   │
-│                                   │                               │          │
-│                                   │ Save                          │ Pre-     │
-│                                   ▼                               │ process  │
-│  ┌─────────────┐  Update   ┌─────────────┐  Clean Data            ▼          │
-│  │  Database   │◀──────────│    Data     │◀─────────────  ┌─────────────┐    │
-│  │  (SQLite)   │           │(Text,Time,  │                │  ppOCRv4    │    │
-│  └─────────────┘           │    Img)     │◀───────────────│  Text Plate │    │
-│                            └─────────────┘   Check Valid  └─────────────┘    │
-│                                   ▲               Save                       │
-│                                   └───────────────────────────────────────   │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
-
-## Hướng dẫn cài đặt
+## Cài đặt
 
 ```bash
-# 1. Clone repository
 git clone <repo-url>
 cd RLVDS-VN-System
 
-# 2. Tạo conda environment
 conda create -n lpr_env python=3.10 -y
 conda activate lpr_env
 
-# 3. Cài đặt dependencies
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
+```
+
+Chuẩn bị file local thường dùng:
+
+- Model detection mặc định: `weights/license_plate.pt`
+- Video mẫu mặc định: `data/samples/sample.mp4`
+- Override cấu hình local: `config/local.yaml`
+
+## Chạy ứng dụng
+
+Streamlit UI:
+
+```bash
+streamlit run app.py
+```
+
+CLI:
+
+```bash
+python main.py --video data/samples/sample.mp4 --no-display
+python main.py --camera 0
+```
+
+Docker Compose:
+
+```bash
+DOCKER_BUILDKIT=0 docker compose up --build
+```
+
+Compose mặc định mở Streamlit tại `http://localhost:8501`, mount `data/samples` và `weights` read-only, đồng thời dùng SQLite trong tmpfs `/tmp/rlvds`.
+
+## Cấu hình
+
+Config mặc định nằm ở `config/default.yaml`. Có thể override bằng `config/local.yaml` hoặc env vars:
+
+```bash
+RLVDS_DETECTION__DEVICE=cpu
+RLVDS_DETECTION__CONFIDENCE_THRESHOLD=0.6
+RLVDS_DATABASE__URL=sqlite:///data/rlvds.db
+```
+
+## Test
+
+```bash
+python -m pytest
+python -m pytest tests/test_frame_integrity.py
+python -m pytest tests/test_ocr_cache.py tests/test_persistence.py
 ```
 
 ## Test Results
@@ -127,32 +133,7 @@ pip install -r requirements.txt
 
 ![Test result 8](docs/test_results/8.png)
 
-## Cách sử dụng (Đang cập nhật)
+## Tài liệu chi tiết
 
-## Chạy bằng Docker Compose
-
-Compose mặc định chạy Streamlit tại `http://localhost:8501` và đặt SQLite
-trong `tmpfs` của container (`/tmp/rlvds/rlvds.db`). Vì vậy DB không được
-lưu ra máy host và sẽ mất khi container bị xóa.
-
-```bash
-DOCKER_BUILDKIT=0 docker compose up --build
-```
-
-Nếu muốn dọn sạch container sau khi chạy:
-
-```bash
-docker compose down
-```
-
-Video mẫu và model weights vẫn được mount read-only từ:
-
-- `./data/samples` → `/app/data/samples`
-- `./weights` → `/app/weights`
-
-Ghi chú GPU: image mặc định dùng CPU Paddle để dễ chạy trên Docker thường.
-Nếu muốn build với Paddle GPU:
-
-```bash
-DOCKER_BUILDKIT=0 PADDLE_PACKAGE=paddlepaddle-gpu==2.6.2 docker compose build
-```
+- [ProjectOverview.md](docs/ProjectOverview.md): mục tiêu, phạm vi, luồng sử dụng và các quyết định cấp project.
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md): kiến trúc kỹ thuật, module, invariant và luồng dữ liệu trong code.
