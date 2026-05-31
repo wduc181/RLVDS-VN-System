@@ -139,6 +139,10 @@ class OCRConfig(BaseModel):
     det_model_dir: str = ""
     rec_model_dir: str = ""
     confidence_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
+    use_angle_cls: bool = False
+    enable_mkldnn: bool = False
+    cpu_threads: int = Field(default=2, ge=1)
+    enhanced_fallback: bool = False
 
 
 class OCRCacheConfig(BaseModel):

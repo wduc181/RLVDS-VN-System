@@ -177,6 +177,12 @@ def _get_image_ocr_components(
                 lang=settings.ocr.lang,
                 use_gpu=settings.ocr.use_gpu,
                 confidence_threshold=settings.ocr.confidence_threshold,
+                det_model_dir=settings.ocr.det_model_dir,
+                rec_model_dir=settings.ocr.rec_model_dir,
+                enable_mkldnn=settings.ocr.enable_mkldnn,
+                cpu_threads=settings.ocr.cpu_threads,
+                use_angle_cls=settings.ocr.use_angle_cls,
+                enhanced_fallback=True,
             )
             st.session_state["image_ocr_engine"] = ocr_engine
         except Exception as exc:  # noqa: BLE001
@@ -432,7 +438,7 @@ def _render_image_ocr_tab(settings: Any) -> None:
             }
             for result in results
         ],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -516,13 +522,13 @@ def main() -> None:
 
         st.button(
             "Start",
-            use_container_width=True,
+            width="stretch",
             disabled=not can_start,
             on_click=lambda: st.session_state.update(should_start=True),
         )
         st.button(
             "Stop",
-            use_container_width=True,
+            width="stretch",
             disabled=not effective_running,
             on_click=lambda: st.session_state.update(running=False),
         )
@@ -566,7 +572,7 @@ def main() -> None:
                 stderr=subprocess.DEVNULL
             )
             st.session_state["ocr_server_proc"] = proc
-            
+
             # Polling check (tối đa 10 giây) để đợi OCR Server khởi động hoàn tất
             status_text = video_tab.empty()
             status_text.info("Đang khởi động OCR Microservice chạy ngầm trên CPU...")
@@ -581,7 +587,7 @@ def main() -> None:
                     break
                 except Exception:
                     pass
-            
+
             if server_online:
                 status_text.success("OCR Microservice đã sẵn sàng!")
                 time.sleep(0.5)
@@ -642,6 +648,12 @@ def main() -> None:
                 lang=settings.ocr.lang,
                 use_gpu=settings.ocr.use_gpu,
                 confidence_threshold=settings.ocr.confidence_threshold,
+                det_model_dir=settings.ocr.det_model_dir,
+                rec_model_dir=settings.ocr.rec_model_dir,
+                enable_mkldnn=settings.ocr.enable_mkldnn,
+                cpu_threads=settings.ocr.cpu_threads,
+                use_angle_cls=settings.ocr.use_angle_cls,
+                enhanced_fallback=settings.ocr.enhanced_fallback,
             )
 
             # Chọn pipeline: CachedPipeline (tối ưu FPS) hoặc MiniPipeline (gốc)

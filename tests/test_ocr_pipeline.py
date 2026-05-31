@@ -53,6 +53,12 @@ def test_format_and_validate_legacy_4_digit_plate() -> None:
     assert check_valid_plate(text) is True
 
 
+def test_format_and_validate_two_letter_series_plate() -> None:
+    text = format_plate("29LD-001.43")
+    assert text == "29LD-00143"
+    assert check_valid_plate(text) is True
+
+
 def test_clean_plate_text_series_a1_and_numeric_tail() -> None:
     # OCR commonly confuses B in numeric tail with digit 8.
     text = clean_plate_text("30A112B45")

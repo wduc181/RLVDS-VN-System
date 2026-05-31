@@ -14,7 +14,11 @@ from rlvds.ocr.preprocessor import prepare_paddle_ocr_input
 
 
 class _FakePreprocessor:
+    def __init__(self) -> None:
+        self.call_count = 0
+
     def run_pipeline(self, image: np.ndarray) -> np.ndarray:
+        self.call_count += 1
         return image
 
 
@@ -130,6 +134,58 @@ def test_license_plate_ocr_returns_unknown_when_engine_raises() -> None:
     assert result == OCRResult(text="unknown", confidence=0.0)
 
 
+def test_license_plate_ocr_skips_enhanced_fallback_by_default() -> None:
+    preprocessor = _FakePreprocessor()
+    ocr = LicensePlateOCR(
+        ocr_engine=_FakePaddleEngine(result=[]),
+        confidence_threshold=0.8,
+        preprocessor=preprocessor,
+    )
+    image = np.ones((16, 50, 3), dtype=np.uint8) * 255
+
+    result = ocr.recognize_with_confidence(image)
+
+    assert result == OCRResult(text="unknown", confidence=0.0)
+    assert preprocessor.call_count == 0
+
+
+def test_license_plate_ocr_can_use_enhanced_fallback() -> None:
+    class _EnhancedPreprocessor(_FakePreprocessor):
+        def run_pipeline(self, image: np.ndarray) -> np.ndarray:
+            self.call_count += 1
+            return np.zeros_like(image)
+
+    class _SequentialPaddleEngine:
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        def ocr(self, _image, cls=False):
+            self.call_count += 1
+            if self.call_count == 1:
+                return []
+            return [
+                [
+                    [[[0, 0], [1, 0], [1, 1], [0, 1]], ("30A12345", 0.95)],
+                ]
+            ]
+
+    preprocessor = _EnhancedPreprocessor()
+    engine = _SequentialPaddleEngine()
+    ocr = LicensePlateOCR(
+        ocr_engine=engine,
+        confidence_threshold=0.8,
+        preprocessor=preprocessor,
+        enhanced_fallback=True,
+    )
+    image = np.ones((16, 50, 3), dtype=np.uint8) * 255
+
+    result = ocr.recognize_with_confidence(image)
+
+    assert result.text == "30A-12345"
+    assert engine.call_count == 2
+    assert preprocessor.call_count == 1
+
+
 def test_prepare_paddle_ocr_input_upscales_small_crop_and_adds_padding() -> None:
     image = np.ones((12, 40, 3), dtype=np.uint8) * 127
 
@@ -169,6 +225,75 @@ def test_license_plate_ocr_merges_multi_line_output() -> None:
     result = ocr.recognize_with_confidence(image)
     assert result.text == "30A-12345"
     assert result.confidence == pytest.approx((0.90 + 0.94) / 2.0)
+
+
+def test_license_plate_ocr_merges_two_line_motorbike_plate() -> None:
+    fake_result = [
+        [
+            [[[0, 0], [1, 0], [1, 1], [0, 1]], ("15-B1", 0.90)],
+            [[[0, 2], [1, 2], [1, 3], [0, 3]], ("982.04", 0.92)],
+        ]
+    ]
+    ocr = LicensePlateOCR(
+        ocr_engine=_FakePaddleEngine(result=fake_result),
+        confidence_threshold=0.8,
+        preprocessor=_FakePreprocessor(),
+    )
+    image = np.ones((30, 120, 3), dtype=np.uint8) * 255
+    result = ocr.recognize_with_confidence(image)
+    assert result.text == "15B1-98204"
+    assert result.confidence == pytest.approx((0.90 + 0.92) / 2.0)
+
+
+def test_license_plate_ocr_parses_flat_multi_entry_result() -> None:
+    fake_result = [
+        [[[0, 0], [1, 0], [1, 1], [0, 1]], ("15-B1", 0.90)],
+        [[[0, 2], [1, 2], [1, 3], [0, 3]], ("982.04", 0.92)],
+    ]
+    ocr = LicensePlateOCR(
+        ocr_engine=_FakePaddleEngine(result=fake_result),
+        confidence_threshold=0.8,
+        preprocessor=_FakePreprocessor(),
+    )
+    image = np.ones((30, 120, 3), dtype=np.uint8) * 255
+    result = ocr.recognize_with_confidence(image)
+    assert result.text == "15B1-98204"
+
+
+def test_license_plate_ocr_accepts_two_letter_series() -> None:
+    fake_result = [
+        [
+            [[[0, 0], [1, 0], [1, 1], [0, 1]], ("29LD-001.43", 0.93)],
+        ]
+    ]
+    ocr = LicensePlateOCR(
+        ocr_engine=_FakePaddleEngine(result=fake_result),
+        confidence_threshold=0.8,
+        preprocessor=_FakePreprocessor(),
+    )
+    image = np.ones((30, 120, 3), dtype=np.uint8) * 255
+    result = ocr.recognize_with_confidence(image)
+    assert result.text == "29LD-00143"
+    assert result.confidence == pytest.approx(0.93)
+
+
+def test_license_plate_ocr_ignores_non_plate_lines() -> None:
+    fake_result = [
+        [
+            [[[0, 0], [10, 0], [10, 5], [0, 5]], ("HONDA", 0.99)],
+            [[[0, 10], [10, 10], [10, 15], [0, 15]], ("90-B2", 0.96)],
+            [[[0, 20], [10, 20], [10, 25], [0, 25]], ("452.30", 0.98)],
+        ]
+    ]
+    ocr = LicensePlateOCR(
+        ocr_engine=_FakePaddleEngine(result=fake_result),
+        confidence_threshold=0.8,
+        preprocessor=_FakePreprocessor(),
+    )
+    image = np.ones((30, 120, 3), dtype=np.uint8) * 255
+    result = ocr.recognize_with_confidence(image)
+    assert result.text == "90B2-45230"
+    assert result.confidence == pytest.approx((0.96 + 0.98) / 2.0)
 
 
 def test_yolov5_char_ocr_returns_unknown_for_invalid_char_count() -> None:

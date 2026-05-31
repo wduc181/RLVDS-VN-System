@@ -54,6 +54,12 @@ class Pipeline:
             lang=self._cfg.ocr.lang,
             use_gpu=self._cfg.ocr.use_gpu,
             confidence_threshold=self._cfg.ocr.confidence_threshold,
+            det_model_dir=self._cfg.ocr.det_model_dir,
+            rec_model_dir=self._cfg.ocr.rec_model_dir,
+            enable_mkldnn=self._cfg.ocr.enable_mkldnn,
+            cpu_threads=self._cfg.ocr.cpu_threads,
+            use_angle_cls=self._cfg.ocr.use_angle_cls,
+            enhanced_fallback=self._cfg.ocr.enhanced_fallback,
         )
         self.zone = ViolationZone(
             vertices=self._cfg.spatial.violation_zone,
