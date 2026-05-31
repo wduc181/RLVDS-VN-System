@@ -119,6 +119,14 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
 ```
 
+## Test Results
+
+![Test result 1](docs/test_results/1.png)
+
+![Test result 4](docs/test_results/4.png)
+
+![Test result 8](docs/test_results/8.png)
+
 ## Cách sử dụng (Đang cập nhật)
 
 ## Chạy bằng Docker Compose
