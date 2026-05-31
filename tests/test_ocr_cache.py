@@ -280,6 +280,18 @@ class TestCachedPipeline:
         assert results[0].from_cache is False
         assert ocr.call_count == 1
 
+    def test_small_low_resolution_crop_still_reaches_ocr(self) -> None:
+        """Small distant plate crops should be upscaled by OCR, not skipped early."""
+        ocr = _CountingOCR()
+        detector = _FakeDetector([Detection(bbox=(10, 10, 25, 18), confidence=0.9)])
+        pipeline = _make_pipeline(ocr=ocr, detector=detector)
+        frame = np.ones((60, 80, 3), dtype=np.uint8) * 128
+
+        results = pipeline.process_frame(frame)
+
+        assert results[0].plate_text == "30A-12345"
+        assert ocr.call_count == 1
+
     def test_second_frame_skips_ocr(self) -> None:
         """Same bbox in second frame uses cache (skip OCR)."""
         ocr = _CountingOCR()
@@ -423,3 +435,64 @@ class TestCachedPipeline:
         pipeline.reset()
         assert pipeline.frame_idx == 0
         assert pipeline.cache.size == 0
+
+
+class TestAsyncCachedPipeline:
+    """Unit tests for CachedPipeline running in Asynchronous OCR mode."""
+
+    def test_async_ocr_lifecycle(self) -> None:
+        """Test that async OCR returns unknown initially and updates cache once done."""
+        import time
+        
+        class _DelayedOCR(_CountingOCR):
+            def recognize_with_confidence(self, _image) -> OCRResult:
+                time.sleep(0.2)  # Simulate OCR latency
+                return super().recognize_with_confidence(_image)
+                
+        ocr = _DelayedOCR(plate_text="30A-12345", confidence=0.92)
+        
+        # Initialize pipeline directly with async_ocr=True
+        zone = ViolationZone(vertices=[[0, 0], [1000, 0], [1000, 1000], [0, 1000]])
+        fsm = TrafficLightFSM(red_sec=30, green_sec=30, yellow_sec=3, initial_state="RED")
+        fsm.start()
+        violation_detector = ViolationDetector(zone=zone, traffic_light=fsm)
+        cache = PlateTrackCache(iou_threshold=0.3, max_size=50, ttl_frames=100)
+        
+        pipeline = CachedPipeline(
+            detector=_FakeDetector(),
+            ocr=ocr,
+            violation_detector=violation_detector,
+            cache=cache,
+            ocr_quality_frames=1,
+            async_ocr=True,
+        )
+
+        frame = np.ones((300, 300, 3), dtype=np.uint8) * 128
+
+        # Frame 1: Cache miss. Async OCR job is submitted.
+        # Should return "unknown" immediately.
+        results = pipeline.process_frame(frame)
+        assert len(results) == 1
+        assert results[0].plate_text == "unknown"
+        assert results[0].from_cache is False
+        
+        # Wait for the background thread to finish OCR processing
+        timeout = 2.0
+        start_time = time.time()
+        while len(pipeline._pending_jobs) > 0 and (time.time() - start_time) < timeout:
+            time.sleep(0.05)
+            
+        assert len(pipeline._pending_jobs) == 0, "Background OCR job did not finish in time"
+
+        # Check that cache is updated with the resolved plate text
+        cached = pipeline.cache.match((100, 100, 200, 200), pipeline.frame_idx)
+        assert cached is not None
+        assert cached.plate_text == "30A-12345"
+        
+        # Frame 2: Same bbox. Should return the resolved plate text from cache.
+        results = pipeline.process_frame(frame)
+        assert len(results) == 1
+        assert results[0].plate_text == "30A-12345"
+        assert results[0].from_cache is True
+        
+        pipeline.close()

@@ -1,902 +1,790 @@
-# RLVDS-VN — Hướng dẫn Kiến trúc & Chi tiết Hệ thống
+# RLVDS-VN Architecture
 
-> **Tài liệu dành cho người mới tiếp cận project lần đầu.**
-> Đọc hết tài liệu này bạn sẽ hiểu toàn bộ cách hệ thống vận hành, từ tổng quan đến từng dòng code.
-
----
+Tài liệu này mô tả kiến trúc kỹ thuật hiện tại của RLVDS-VN sau khi quét lại codebase. Nếu cần góc nhìn sản phẩm, phạm vi và luồng sử dụng, đọc [ProjectOverview.md](ProjectOverview.md).
 
 ## Mục lục
 
-1. [Tổng quan](#1-tổng-quan)
-2. [Cây thư mục & vai trò từng file](#2-cây-thư-mục--vai-trò-từng-file)
-3. [Kiến trúc tổng thể](#3-kiến-trúc-tổng-thể)
-4. [Luồng xử lý chi tiết](#4-luồng-xử-lý-chi-tiết)
-5. [Tầng Ingestion — Đọc video](#5-tầng-ingestion--đọc-video)
-6. [Tầng Detection — Phát hiện biển số](#6-tầng-detection--phát-hiện-biển-số)
-7. [Tầng OCR — Nhận diện ký tự](#7-tầng-ocr--nhận-diện-ký-tự)
-8. [Tầng Spatial — Vùng không gian](#8-tầng-spatial--vùng-không-gian)
-9. [Tầng Temporal — Logic thời gian](#9-tầng-temporal--logic-thời-gian)
-10. [Tầng Tracking — Theo dõi đối tượng](#10-tầng-tracking--theo-dõi-đối-tượng)
-11. [Tầng Persistence — Lưu trữ](#11-tầng-persistence--lưu-trữ)
-12. [Hệ thống Cấu hình](#12-hệ-thống-cấu-hình)
-13. [Pipeline & Entry Points](#13-pipeline--entry-points)
-14. [Caching & Tối ưu FPS](#14-caching--tối-ưu-fps)
-15. [Docker](#15-docker)
-16. [Testing](#16-testing)
-17. [Phụ lục: Các quyết định thiết kế quan trọng](#17-phụ-lục-các-quyết-định-thiết-kế-quan-trọng)
+1. [Tổng quan kiến trúc](#1-tổng-quan-kiến-trúc)
+2. [Cây thư mục](#2-cây-thư-mục)
+3. [Invariant dữ liệu](#3-invariant-dữ-liệu)
+4. [Entry points](#4-entry-points)
+5. [Pipeline layer](#5-pipeline-layer)
+6. [Ingestion](#6-ingestion)
+7. [Detection](#7-detection)
+8. [OCR](#8-ocr)
+9. [Spatial và Temporal](#9-spatial-và-temporal)
+10. [Persistence](#10-persistence)
+11. [Tracking](#11-tracking)
+12. [Configuration](#12-configuration)
+13. [Visualization và UI](#13-visualization-và-ui)
+14. [Docker runtime](#14-docker-runtime)
+15. [Testing](#15-testing)
+16. [Quyết định thiết kế quan trọng](#16-quyết-định-thiết-kế-quan-trọng)
 
----
+## 1. Tổng quan kiến trúc
 
-## 1. Tổng quan
+RLVDS-VN được tổ chức theo kiến trúc phân tầng:
 
-**RLVDS-VN** (Red Light Violation Detection System - Vietnam) là hệ thống thị giác máy tính tự động phát hiện hành vi **vượt đèn đỏ** và nhận diện biển số xe tại Việt Nam.
-
-### Bài toán
-
-- **Input:** Video từ camera giám sát cố định tại ngã tư
-- **Output:** Danh sách biển số xe vi phạm + thời gian + ảnh bằng chứng
-- **Logic vi phạm:** Biển số xe nằm trong vùng polygon giám sát **VÀ** đèn giao thông đang đỏ
-
-### Công nghệ chính
-
-| Lớp | Công nghệ | Vai trò |
-|-----|-----------|---------|
-| Detection | YOLOv5 (torch.hub) | Tìm vị trí biển số trong frame |
-| OCR | PaddleOCR (ppOCRv4) | Đọc ký tự từ ảnh biển số đã crop |
-| Xử lý ảnh | OpenCV | Upscale, denoise, CLAHE, vẽ annotation |
-| UI | Streamlit | Giao diện web xem video + kết quả |
-| Database | SQLite | Lưu trữ vi phạm |
-| Config | Pydantic + YAML | Type-safe config, override bằng ENV |
-| Tracking | SORT (Kalman + Hungarian) | Theo dõi biển số qua nhiều frame |
-
----
-
-## 2. Cây thư mục & vai trò từng file
-
+```text
+app.py / main.py
+        |
+        v
+Pipeline / MiniPipeline / CachedPipeline
+        |
+        +--> Ingestion: VideoSource, FrameBuffer
+        +--> Detection: LicensePlateDetector
+        +--> OCR: LicensePlateOCR, OCR server, PlateTrackCache
+        +--> Spatial: ViolationZone, polygon utilities
+        +--> Temporal: TrafficLightFSM, ViolationDetector
+        +--> Persistence: Database, ViolationRepository
+        +--> Visualization: overlay, bbox, FPS, light state
 ```
+
+Luồng xử lý runtime:
+
+```text
+OpenCV frame (BGR raw)
+    -> detector.detect(raw_frame)
+    -> crop plate from raw_frame
+    -> OCR direct/cache/async
+    -> violation check: RED + anchor point inside polygon
+    -> repository.record_violation(raw_frame, crop, metadata)
+    -> draw overlay on display frame
+```
+
+Điểm quan trọng: frame phục vụ detection/OCR/persistence phải là frame raw. Frame đã vẽ polygon/bbox/text chỉ dùng để hiển thị hoặc làm scene evidence sau khi đã xử lý dữ liệu sạch.
+
+## 2. Cây thư mục
+
+```text
 RLVDS-VN-System/
-│
-├── app.py                          # Entry point Streamlit UI
-├── main.py                         # Entry point CLI (terminal)
-├── requirements.txt                # Python dependencies
-├── Dockerfile                      # Docker image definition
-├── docker-compose.yml              # Docker Compose config
-│
-├── config/                         # ═══ Hệ thống cấu hình ═══
-│   ├── default.yaml                #   Toàn bộ config mặc định
-│   ├── settings.py                 #   Pydantic models, load YAML, merge ENV
-│   └── __init__.py
-│
-├── rlvds/                          # ═══ Package chính ═══
-│   │
-│   ├── core/                       # Lõi kiến trúc
-│   │   ├── base.py                 #   Abstract Base Classes + Dataclasses
-│   │   ├── pipeline.py             #   Full pipeline (CLI mode)
-│   │   ├── mini_pipeline.py        #   Pipeline đơn giản (từng frame)
-│   │   └── cached_pipeline.py      #   Pipeline có OCR cache
-│   │
-│   ├── ingestion/                  # Đọc video
-│   │   ├── video_source.py         #   Wrapper cv2.VideoCapture
-│   │   └── frame_buffer.py         #   Buffer thread-safe
-│   │
-│   ├── detection/                  # Phát hiện biển số
-│   │   ├── detector.py             #   YOLOv5 detector
-│   │   └── models.py               #   Re-export dataclasses
-│   │
-│   ├── ocr/                        # Nhận diện ký tự
-│   │   ├── recognizer.py           #   PaddleOCR + YOLOv5CharOCR
-│   │   ├── preprocessor.py         #   Pipeline tiền xử lý ảnh
-│   │   ├── postprocess.py          #   Chuẩn hóa text, validate biển số
-│   │   └── plate_cache.py          #   OCR cache (IOU matching)
-│   │
-│   ├── spatial/                    # Logic không gian
-│   │   ├── polygon.py              #   Point-in-polygon, mask, draw
-│   │   ├── zones.py                #   ViolationZone class
-│   │   └── calibration.py          #   Camera calibration (TODO)
-│   │
-│   ├── temporal/                   # Logic thời gian
-│   │   ├── traffic_light.py        #   FSM đèn giao thông
-│   │   ├── timing.py               #   Utility thời gian
-│   │   └── violation.py            #   ViolationDetector
-│   │
-│   ├── tracking/                   # Theo dõi đối tượng
-│   │   ├── tracker.py              #   SORT implementation
-│   │   ├── track_state.py          #   KalmanBoxTracker
-│   │   └── bbox_matcher.py         #   Hàm tính IOU
-│   │
-│   ├── persistence/                # Lưu trữ
-│   │   ├── database.py             #   SQLite wrapper
-│   │   ├── models.py               #   Pydantic models cho DB
-│   │   └── repository.py           #   CRUD + ảnh + export
-│   │
-│   └── utils/                      # Tiện ích
-│       ├── logger.py               #   Logging setup
-│       ├── visualization.py        #   Vẽ bbox, text, zone
-│       └── io.py                   #   File I/O helpers
-│
-├── tests/                          # ═══ Test suite ═══
-│   ├── test_detection.py
-│   ├── test_ocr_pipeline.py
-│   ├── test_ocr_recognizer.py
-│   ├── test_ocr_cache.py
-│   ├── test_polygon.py
-│   ├── test_traffic_light.py
-│   └── test_persistence.py
-│
-├── weights/                        # Model weights (.pt)
-├── data/                           # Dữ liệu
-│   ├── samples/                    #   Video mẫu
-│   ├── violations/                 #   Ảnh vi phạm được lưu
-│   └── rlvds.db                    #   SQLite database
-├── training/                       # Notebooks & configs huấn luyện
-├── docs/                           # Tài liệu
-└── logs/                           # Log files
+├── app.py                         # Streamlit UI: video stream + image OCR
+├── main.py                        # CLI entry point
+├── config/
+│   ├── default.yaml               # Config mặc định
+│   └── settings.py                # Pydantic settings, YAML/env merge
+├── rlvds/
+│   ├── core/
+│   │   ├── base.py                # Dataclasses + abstract interfaces
+│   │   ├── pipeline.py            # Full CLI pipeline
+│   │   ├── mini_pipeline.py       # Detect -> OCR -> violation
+│   │   └── cached_pipeline.py     # MiniPipeline + OCR cache/async
+│   ├── ingestion/
+│   │   ├── video_source.py        # OpenCV VideoCapture wrapper
+│   │   └── frame_buffer.py        # Thread-safe deque buffer
+│   ├── detection/
+│   │   ├── detector.py            # YOLOv5 detector
+│   │   └── models.py              # Detection exports
+│   ├── ocr/
+│   │   ├── recognizer.py          # PaddleOCR + YOLOv5CharOCR
+│   │   ├── ocr_server.py          # CPU OCR HTTP microservice
+│   │   ├── preprocessor.py        # Crop/upscale/denoise/CLAHE helpers
+│   │   ├── postprocess.py         # VN plate clean/format/validate
+│   │   └── plate_cache.py         # IOU-based OCR cache
+│   ├── spatial/
+│   │   ├── polygon.py             # Mask, draw, point-in-polygon
+│   │   └── zones.py               # ViolationZone
+│   ├── temporal/
+│   │   ├── traffic_light.py       # RED/GREEN/YELLOW FSM
+│   │   └── violation.py           # ViolationDetector
+│   ├── persistence/
+│   │   ├── database.py            # SQLite wrapper + schema
+│   │   ├── models.py              # Pydantic DB models
+│   │   └── repository.py          # CRUD + image persistence
+│   ├── tracking/
+│   │   ├── tracker.py             # SORT-style tracker
+│   │   ├── track_state.py         # KalmanBoxTracker
+│   │   └── bbox_matcher.py        # IOU helper
+│   └── utils/
+│       ├── logger.py
+│       ├── visualization.py
+│       └── io.py
+├── tests/
+├── docs/
+├── training/                      # Notebook/config training; yolov5 vendored
+├── weights/                       # Local weights, gitignored
+└── data/                          # Local samples, DB, evidence, gitignored
 ```
 
----
+## 3. Invariant dữ liệu
 
-## 3. Kiến trúc tổng thể
+Các invariant này được test và nên giữ khi sửa logic frame/video:
 
-Hệ thống được thiết kế theo kiến trúc **phân tầng (layered architecture)** với 7 tầng chính:
+- Frame từ OpenCV là `numpy.ndarray` BGR.
+- `Detection.bbox` có dạng `(x1, y1, x2, y2)` theo pixel.
+- Anchor point của detection là giữa cạnh dưới bbox: `(center_x, y2)`.
+- Detection, OCR crop và persistence dùng raw frame hoặc crop từ raw frame.
+- Không dùng frame đã vẽ overlay để OCR hoặc lưu crop biển số.
+- OCR `"unknown"` vẫn có thể là evidence vi phạm nếu điều kiện RED + polygon đúng.
+- Repository cho phép nhiều record cho cùng một biển số.
+- Khi OCR fail, repository tạo `plate_text` dạng `OCR_FAILED_<timestamp>_<bbox>` và `status=OCR_FAILED`.
+- Khi xóa record, repository chỉ xóa file nằm dưới `violations_dir`.
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    ENTRY POINTS                         │
-│         main.py (CLI)          app.py (Streamlit)       │
-├─────────────────────────────────────────────────────────┤
-│                    PIPELINE LAYER                       │
-│    Pipeline  │  MiniPipeline  │  CachedPipeline         │
-├─────────────────────────────────────────────────────────┤
-│  INGESTION   │  DETECTION  │  OCR       │  PERSISTENCE  │
-│  ─────────   │  ─────────  │  ───       │  ───────────  │
-│ VideoSource  │  YOLOv5     │ PaddleOCR  │  SQLite       │
-│ FrameBuffer  │  Detector   │ Preprocessor│  Repository  │
-├──────────────┴─────────────┴────────────┴──────────────┤
-│              SPATIAL            │       TEMPORAL        │
-│              ───────            │       ────────        │
-│         ViolationZone           │   TrafficLightFSM     │
-│         Polygon utils           │   ViolationDetector   │
-├─────────────────────────────────────────────────────────┤
-│                    TRACKING (optional)                  │
-│              SORT Tracker + Kalman Filter               │
-├─────────────────────────────────────────────────────────┤
-│                    CONFIG LAYER                         │
-│         default.yaml  →  Pydantic Settings  ←  ENV      │
-└─────────────────────────────────────────────────────────┘
-```
+## 4. Entry points
 
-### Nguyên tắc thiết kế
+### `app.py`
 
-1. **Interface Segregation:** Mỗi module kế thừa từ Abstract Base Class (trong `core/base.py`). Có thể thay thế implementation dễ dàng (vd: đổi YOLOv5 → YOLOv8, PaddleOCR → Tesseract).
+Streamlit app có hai tab:
 
-2. **Dependency Injection:** Các component được khởi tạo bên ngoài và inject qua constructor. Pipeline không tự `import` cụ thể detector/OCR nào.
+- `Video Stream`: chạy video mẫu với overlay, detection/OCR tùy chọn, metrics và persistence.
+- `Image OCR`: upload ảnh tĩnh, detect biển số và OCR từng crop.
 
-3. **Configuration-driven:** Mọi tham số đều nằm trong `config/default.yaml`, có thể override bằng `config/local.yaml` hoặc biến môi trường.
+Lifecycle khi Start video:
 
-4. **Protocol-based typing:** Dùng `Protocol` (structural subtyping) thay vì ABC khi chỉ cần duck-typing (vd: `DetectorLike`, `OCRLike`).
+1. Cleanup session cũ bằng `_cleanup_video_source()`.
+2. Kiểm tra OCR microservice ở `127.0.0.1:8502`.
+3. Nếu chưa có server, spawn `rlvds/ocr/ocr_server.py` bằng `subprocess.Popen`.
+4. Mở `VideoSource`.
+5. Tạo `ViolationZone`, `TrafficLightFSM`, `ViolationDetector`, `FrameBuffer`.
+6. Tạo `Database`, `ViolationRepository`, `PlatePreprocessor`.
+7. Tạo `LicensePlateDetector` và `LicensePlateOCR`.
+8. Chọn `CachedPipeline` nếu `settings.ocr_cache.enabled`, nếu không dùng `MiniPipeline`.
+9. Lưu runtime object vào `st.session_state`.
 
----
+Vòng stream:
 
-## 4. Luồng xử lý chi tiết
-
-### 4.1 Tổng quan luồng
-
-```
-Video/Camera
-    │
-    ▼
-┌─────────────┐
-│ VideoSource │  Đọc từng frame qua OpenCV
-└──────┬──────┘
-       │ frame (BGR numpy array)
-       ▼
-┌─────────────────┐
-│ YOLOv5 Detector │  Phát hiện bounding box biển số
-└──────┬──────────┘
-       │ List[Detection] — mỗi Detection có bbox, confidence
-       ▼
-┌──────────────────────┐
-│ Plate OCR Cache      │  Kiểm tra cache: bbox này đã OCR chưa?
-│ (IOU-based matching) │
-└──────┬───────────────┘
-       │
-       ├── Cache HIT  → reuse plate_text
-       │
-       └── Cache MISS → crop ảnh → preprocess → PaddleOCR
-              │
-              ▼
-       ┌──────────────────────┐
-       │ PlatePreprocessor    │
-       │ upscale 2x → denoise │
-       │ → CLAHE contrast     │
-       └──────┬───────────────┘
-              │ grayscale ảnh đã xử lý
-              ▼
-       ┌──────────────────────┐
-       │ PaddleOCR (ppOCRv4)  │  Nhận diện text
-       └──────┬───────────────┘
-              │ raw text
-              ▼
-       ┌──────────────────────┐
-       │ Post-process         │  chuẩn hóa → format VN plate
-       └──────┬───────────────┘
-              │ plate_text chuẩn (vd: "59A-12345")
-              ▼
-┌──────────────────────┐
-│ Violation Check      │
-│ ┌──────────────────┐ │
-│ │ TrafficLightFSM  │ │  Đèn đang RED?
-│ │ ViolationZone    │ │  Anchor point trong zone?
-│ └──────────────────┘ │
-└──────┬───────────────┘
-       │
-       ├── VI PHẠM → lưu ảnh + DB
-       │
-       └── KHÔNG vi phạm → chỉ hiển thị
-              │
-              ▼
-       ┌──────────────────────┐
-       │ Visualization        │  Vẽ bbox, text, zone, FPS
-       │ Streamlit display    │
-       └──────────────────────┘
+```text
+read_frame()
+copy raw_frame
+draw zone on display frame
+if detection enabled:
+    pipeline.process_frame(raw_frame)
+    draw detections on display frame
+if result.is_violation:
+    crop from raw_frame
+    repository.record_violation(...)
+draw light/FPS
+st.image(display_frame)
 ```
 
-### 4.2 Điều kiện xác định vi phạm
+Khi Stop hoặc hết video, app release video source, disconnect DB, close cached pipeline executor và terminate OCR process nếu app đã spawn process đó.
 
-Một detection được coi là vi phạm khi **đồng thời** thỏa mãn:
+### `main.py`
 
-1. **Đèn giao thông đang ĐỎ** — `TrafficLightFSM.is_red() == True`
-2. **Anchor point của biển số nằm trong vùng polygon giám sát** — `ViolationZone.is_in_zone(anchor_point) == True`
-3. **OCR đọc được biển số hợp lệ** — không phải `"unknown"` và pass `check_valid_plate()`
+CLI parse các tham số:
 
-> **Anchor point** = điểm giữa cạnh dưới của bounding box `(center_x, y2)`. Đây là điểm gần mặt đường nhất, dùng để xác định xe đã vượt qua vạch dừng hay chưa.
+```bash
+python main.py --video data/samples/sample.mp4
+python main.py --camera 0
+python main.py --video data/samples/sample.mp4 --debug --no-display
+```
 
----
+`main.py` khởi tạo `Pipeline(settings)` và gọi `pipeline.run(source, display=...)`.
 
-## 5. Tầng Ingestion — Đọc video
+Lưu ý: `--config` hiện được parse nhưng chưa được nối vào `get_settings()`. Override thực tế nên dùng `config/local.yaml` hoặc env vars `RLVDS_`.
 
-### File: `rlvds/ingestion/video_source.py`
+## 5. Pipeline layer
 
-**Class `VideoSource`** kế thừa `BaseVideoSource`, wrap `cv2.VideoCapture`.
+### `Pipeline`
 
-#### Các chế độ nguồn
+`rlvds/core/pipeline.py` là orchestration đầy đủ cho CLI:
 
-| Loại | Ví dụ | Cách nhận diện |
-|------|-------|---------------|
-| File video | `"data/samples/v1.mp4"` | Path tồn tại trên disk |
-| Webcam | `0`, `1` | Số nguyên |
-| IP Camera | `"rtsp://..."`, `"http://..."` | Prefix protocol |
+- Khởi tạo detector, OCR, zone, traffic light, violation detector.
+- Khi `_start()` được gọi, mở `VideoSource`, connect SQLite, tạo repository.
+- Nếu `ocr_cache.enabled`, tạo `CachedPipeline`; nếu không tạo `MiniPipeline`.
+- Loop qua frame, giữ `raw_frame`, tạo `display_frame`, chạy detection theo `inference_interval_frames`, persist violation rồi vẽ overlay.
+- `stop()` release video, disconnect DB và destroy OpenCV windows.
 
-#### Các method quan trọng
+`Pipeline` dùng `VideoSource.iter_frames_throttled()` nếu `video.fps > 0`, giúp skip frame bằng `grab()` thay vì decode toàn bộ frame.
+
+### `MiniPipeline`
+
+`rlvds/core/mini_pipeline.py` là flow đơn giản:
+
+```text
+detector.detect(frame)
+for detection:
+    detector.crop_plate(detection, frame)
+    ocr.recognize(crop)
+    violation_detector.check_mock_violation(plate_text, detection)
+```
+
+Output là `MiniPipelineResult(plate_text, detection, is_violation)`.
+
+### `CachedPipeline`
+
+`rlvds/core/cached_pipeline.py` thêm cache OCR:
+
+```text
+detector.detect(frame)
+for detection:
+    cache.match(detection.bbox)
+    if miss:
+        crop -> OCR -> cache
+    if hit and ocr_count < quality_frames:
+        OCR thêm lần nữa để cải thiện confidence
+    else:
+        reuse cached text
+    check_mock_violation(...)
+cache.cleanup(frame_idx)
+```
+
+Các thuộc tính quan trọng:
+
+- `PlateTrackCache`: match bbox theo IOU.
+- `ocr_quality_frames`: số lần OCR tối đa trên cùng một cached plate.
+- `async_ocr`: khi bật, OCR chạy trong `ThreadPoolExecutor`.
+
+Streamlit truyền `async_ocr=settings.ocr_cache.async_ocr`. `Pipeline` CLI hiện tạo `CachedPipeline` theo flow đồng bộ vì không truyền `async_ocr`.
+
+## 6. Ingestion
+
+### `VideoSource`
+
+`rlvds/ingestion/video_source.py` wrap `cv2.VideoCapture`.
+
+Nguồn hỗ trợ:
+
+- File video: path tồn tại trên disk.
+- Webcam: `0`, `1` hoặc string số.
+- Stream URL: `rtsp://`, `http://`, `https://`, `rtmp://`, `udp://`.
+
+API chính:
+
+- `read_frame() -> tuple[bool, np.ndarray | None]`
+- `grab_frame() -> bool`
+- `retrieve_frame()`
+- `iter_frames()`
+- `iter_frames_throttled(target_fps)`
+- `get_fps()`, `get_frame_size()`, `get_frame_count()`
+- `release()`
+
+Stream input có cơ chế tolerance lỗi đọc và reconnect. File input dừng ngay khi end-of-stream.
+
+### `FrameBuffer`
+
+`FrameBuffer` là deque thread-safe, có `put`, `get`, `clear`, `is_full` và helper `skip_frames`. Hiện app tạo buffer theo runtime components nhưng luồng xử lý chính vẫn đọc frame tuần tự.
+
+## 7. Detection
+
+### `LicensePlateDetector`
+
+File: `rlvds/detection/detector.py`
+
+Khởi tạo:
 
 ```python
-# Đọc 1 frame (decode hoàn chỉnh)
-ok, frame = src.read_frame()
-
-# Chỉ grab header (nhanh, ~1ms, không decode) — dùng để skip frame
-grabbed = src.grab_frame()
-
-# Đọc toàn bộ frame không giới hạn
-for frame in src.iter_frames():
-    process(frame)
-
-# Đọc frame ở target FPS — skip frame thừa bằng grab()
-for frame in src.iter_frames_throttled(30.0):
-    process(frame)
+LicensePlateDetector(
+    model_path=settings.detection.model_path,
+    confidence_threshold=settings.detection.confidence_threshold,
+    iou_threshold=settings.detection.iou_threshold,
+    image_size=settings.detection.image_size,
+    device=settings.detection.device,
+)
 ```
 
-#### Cơ chế reconnect cho stream
-
-Khi đọc IP camera (RTSP/HTTP), nếu mất kết nối:
-- Đếm `max_read_failures` (mặc định 20)
-- Thử reconnect với `max_reconnect_attempts` (mặc định 10)
-- `_safe_reopen()` gọi `reopen()` có try/except
-
-#### `iter_frames_throttled` — cơ chế tiết kiệm
-
-Thay vì `read()` tất cả frame rồi bỏ đi (tốn decode), method này:
-- Frame cần xử lý → `read_frame()` (decode đầy đủ)
-- Frame bỏ qua → `grab_frame()` (chỉ đọc header, không decode)
-
----
-
-## 6. Tầng Detection — Phát hiện biển số
-
-### File: `rlvds/detection/detector.py`
-
-**Class `LicensePlateDetector`** kế thừa `BaseDetector`.
-
-#### Cách load model
+Load model:
 
 ```python
-self.model = torch.hub.load(
-    "ultralytics/yolov5",    # repo
-    "custom",                # custom weights
-    path="weights/license_plate.pt",
+torch.hub.load(
+    "ultralytics/yolov5",
+    "custom",
+    path=model_path,
     force_reload=False,
+    trust_repo=True,
 )
 ```
 
-#### Cấu hình model
+Nếu model path không tồn tại hoặc load lỗi:
+
+- `self.model = None`
+- `is_available() == False`
+- `detect()` trả `[]`
+
+`detect(frame)` parse `results.pandas().xyxy[0]` và tạo `Detection`.
+
+`crop_plate(detection, frame, expand_ratio)`:
+
+- Mở rộng bbox theo phần trăm width/height.
+- Clip theo kích thước frame.
+- Trả bản copy crop từ raw frame.
+
+## 8. OCR
+
+### `LicensePlateOCR`
+
+File: `rlvds/ocr/recognizer.py`
+
+API:
+
+- `recognize(image) -> str`
+- `recognize_with_confidence(image) -> OCRResult`
+- `preprocess(image) -> np.ndarray`
+
+Luồng `recognize_with_confidence`:
+
+1. Trả `"unknown"` nếu ảnh rỗng.
+2. Tạo input variants bằng `_ocr_input_variants()`:
+   - `raw`: `prepare_paddle_ocr_input(image)`
+   - `enhanced`: chỉ có khi `enhanced_fallback=True`
+3. Nếu `_use_http=True`, thử POST ảnh PNG sang `http://127.0.0.1:8502`.
+4. Nếu HTTP fail hoặc không có server, dùng PaddleOCR local nếu engine build thành công.
+5. Parse PaddleOCR result bằng `_parse_paddle_result`.
+6. Format và validate biển số bằng `_format_valid_result`.
+7. Nếu không có result hợp lệ, trả `OCRResult("unknown", 0.0)`.
+
+### OCR microservice
+
+File: `rlvds/ocr/ocr_server.py`
+
+Microservice chạy PaddleOCR CPU trong process riêng:
+
+- Bind `127.0.0.1:8502`.
+- Nhận ảnh binary qua HTTP POST.
+- Decode bằng OpenCV.
+- Chuẩn bị input bằng `prepare_paddle_ocr_input`.
+- Trả JSON `{"raw_result": ...}`.
+
+Mục tiêu là tách PaddleOCR khỏi process chính đang dùng PyTorch/YOLO để giảm rủi ro xung đột CUDA/cuDNN và ổn định FPS.
+
+### PaddleOCR CPU policy
+
+`LicensePlateOCR._paddle_kwargs()` hardcode:
 
 ```python
-self.model.conf = confidence_threshold  # ngưỡng confidence (default 0.5)
-self.model.iou = iou_threshold          # ngưỡng IOU cho NMS (default 0.45)
-self.model.to(device)                   # "cuda" hoặc "cpu"
+"use_gpu": False
 ```
 
-#### Method `detect(frame)` → `List[Detection]`
+Vì vậy PaddleOCR local luôn chạy CPU, dù config có `ocr.use_gpu`. Docker cũng mặc định cài Paddle CPU, trừ khi build override `PADDLE_PACKAGE`.
+
+### Preprocessor
+
+File: `rlvds/ocr/preprocessor.py`
+
+`PlatePreprocessor` có các bước:
+
+```text
+crop_plate_region -> denoise -> upscale -> CLAHE
+```
+
+Trong `run_pipeline(image)`:
+
+1. `denoise()` chuyển grayscale và chạy `fastNlMeansDenoising`.
+2. `upscale()` resize bằng `cv2.INTER_CUBIC`.
+3. `apply_clahe()` tăng tương phản local.
+
+Preprocessor được dùng cho:
+
+- Enhanced OCR fallback nếu bật.
+- Plate image lưu evidence.
+- Test OCR preprocessing.
+
+`prepare_paddle_ocr_input()` riêng biệt với `PlatePreprocessor`; nó đảm bảo crop nhỏ được upscale/pad thành ảnh BGR phù hợp hơn cho PaddleOCR.
+
+### Postprocess
+
+File: `rlvds/ocr/postprocess.py`
+
+Các hàm chính:
+
+- `clean_plate_text(raw_text)`
+- `format_plate(text)`
+- `check_valid_plate(plate)`
+- `to_gray(image)`
+
+Quy tắc hiện tại:
+
+- Giữ ký tự `[A-Za-z0-9.-]`, uppercase, bỏ dấu chấm và dấu gạch nối không tin cậy.
+- Hai ký tự đầu là mã tỉnh dạng số.
+- Series được sửa theo ngữ cảnh alpha/digit.
+- Tail phải là 4-5 chữ số.
+- Hỗ trợ series đặc biệt hai chữ như `LD`, `NN`, `NG`, `CD`, `KT`, ...
+- Từ chối mã tỉnh ngoài `11-99` và một số mã không hợp lệ.
+
+### YOLOv5 character OCR
+
+`YOLOv5CharOCR` detect từng ký tự bằng YOLOv5:
+
+- Nhận 7-10 ký tự.
+- Ghép một dòng bằng thứ tự x.
+- Nhận diện biển hai dòng bằng kiểm tra độ thẳng hàng tương đối.
+- Trả `OCRResult(text, avg_confidence)` hoặc `"unknown"`.
+
+Hiện đây là engine fallback/extension, không phải flow mặc định của Streamlit.
+
+### PlateTrackCache
+
+File: `rlvds/ocr/plate_cache.py`
+
+Entry cache:
 
 ```python
-results = self.model(frame, size=640)
-# Parse kết quả từ pandas DataFrame
-for row in results.pandas().xyxy[0].values.tolist():
-    x1, y1, x2, y2, confidence, class_id, class_name = ...
-    detections.append(Detection(bbox=(x1,y1,x2,y2), ...))
-```
-
-#### Method `crop_plate(detection, frame, expand_ratio=0.15)`
-
-Cắt vùng biển số, mở rộng bbox 15% mỗi phía để tránh mất ký tự ở rìa, clip trong giới hạn frame.
-
-#### `is_available()`
-
-Trả về `True` nếu `self.model is not None` — dùng để fallback khi model file không tồn tại.
-
----
-
-## 7. Tầng OCR — Nhận diện ký tự
-
-### 7.1 Recognizer — `rlvds/ocr/recognizer.py`
-
-**Class `LicensePlateOCR`** (chính):
-- Wrap PaddleOCR với `use_gpu=False` (luôn CPU để tránh xung đột cuDNN giữa PyTorch CUDA 12.4 và PaddlePaddle 2.6.2)
-- `recognize(image)` → `str`
-- `recognize_with_confidence(image)` → `OCRResult(text, confidence)`
-
-**Class `YOLOv5CharOCR`** (dự phòng):
-- Dùng YOLOv5 để detect từng ký tự riêng lẻ
-- Tự động phân loại biển 1 dòng (ô tô) vs 2 dòng (xe máy)
-- Ghép ký tự theo tọa độ x
-
-#### Flow OCR chính
-
-```
-1. PaddleOCR(image, cls=False)
-2. Parse kết quả → lọc theo confidence_threshold
-3. clean_plate_text() → chuẩn hóa ký tự
-4. format_plate() → định dạng biển số VN
-```
-
-### 7.2 Preprocessor — `rlvds/ocr/preprocessor.py`
-
-**Pipeline 4 bước**:
-
-```
-Crop từ frame → Upscale 2x → Denoise → CLAHE
-```
-
-| Bước | Method | Tham số chính |
-|------|--------|--------------|
-| Crop | `crop_plate_region()` | `expand_ratio=0.15` |
-| Upscale | `cv2.INTER_CUBIC` | `upscale_factor=2.0` |
-| Denoise | `cv2.fastNlMeansDenoising` | `h=30, template=7, search=21` |
-| CLAHE | `cv2.createCLAHE` | `clipLimit=2.0, tileGridSize=(8,8)` |
-
-Kết quả cuối cùng là ảnh **grayscale** đã được tăng cường, sẵn sàng cho OCR.
-
-### 7.3 Post-process — `rlvds/ocr/postprocess.py`
-
-#### `clean_plate_text(raw_text)` → chuỗi đã chuẩn hóa
-
-1. Xóa ký tự không phải `[A-Za-z0-9.-]`
-2. Uppercase, bỏ dấu `.`
-3. Bỏ tất cả dấu `-` (vì OCR thường đặt sai vị trí)
-4. Sửa lỗi OCR phổ biến:
-   - Ký tự đầu (province code): `O→0, I→1, Z→2, S→5, G→6, B→8`
-   - Ký tự series (chữ cái): `0→O, 1→I, 2→Z, 5→S, 6→G, 8→B`
-   - Phần đuôi (số): luôn là digits
-
-#### `format_plate(text)` → định dạng biển số VN
-
-- Biển 7-8 ký tự: `XXX-XXXX` hoặc `XXX-XXXXX`
-- Biển 9-10 ký tự (có series 4 ký tự): `XXXX-XXXXX`
-- Tự động thêm dấu `-` vào vị trí đúng
-
-#### `check_valid_plate(plate)` → bool
-
-Validate biển số VN:
-- Province code: 2 chữ số, `11–99`, không nằm trong danh sách mã tỉnh không hợp lệ
-- Prefix: `\d{2}[A-Z]\d?`
-- Tail: 4-5 chữ số
-
----
-
-## 8. Tầng Spatial — Vùng không gian
-
-### File: `rlvds/spatial/polygon.py`
-
-Các hàm utility:
-
-| Hàm | Chức năng |
-|-----|----------|
-| `create_polygon(vertices)` | List of points → numpy array `(N,1,2)` int32 |
-| `create_mask(frame, polygon)` | Tô trắng polygon, phần còn lại đen → bitwise_and |
-| `draw_polygon(frame, polygon)` | Vẽ viền polygon lên frame |
-| `point_in_polygon(point, polygon)` | `cv2.pointPolygonTest` → True/False |
-| `point_distance_to_polygon(point, polygon)` | Khoảng cách có dấu đến polygon |
-
-### File: `rlvds/spatial/zones.py`
-
-**Class `ViolationZone`** kế thừa `BaseSpatialReasoner`:
-
-```python
-zone = ViolationZone(
-    vertices=[[600,450], [1200,450], [1260,700], [600,700]],
-    zone_id="default",
-    color=(0, 0, 255),
+CachedPlate(
+    plate_text,
+    bbox,
+    confidence,
+    first_seen_frame,
+    last_seen_frame,
+    ocr_count,
 )
-
-# Kiểm tra điểm trong zone
-zone.is_in_zone((cx, y2))
-
-# Vẽ zone lên frame
-zone.draw(frame)
-
-# Mask frame (giữ lại phần trong zone)
-masked = zone.apply_mask(frame)
 ```
 
-### Polygon được định nghĩa trong config
+Matching:
 
-```yaml
-# config/default.yaml
-spatial:
-  violation_zone: [[600, 450], [1200, 450], [1260, 700], [600, 700]]
+- Tính IOU giữa bbox mới và bbox cached.
+- Bỏ qua entry hết TTL.
+- Chọn entry IOU cao nhất nếu IOU >= threshold.
+
+Stats:
+
+- `hit_count`
+- `miss_count`
+- `hit_rate`
+- `size`
+
+`add_or_update()` không làm tăng hit/miss stats, tránh sai lệch số liệu cache.
+
+## 9. Spatial và Temporal
+
+### Spatial
+
+`rlvds/spatial/polygon.py`:
+
+- `create_polygon(vertices)`
+- `create_mask(frame, polygon)`
+- `draw_polygon(frame, polygon)`
+- `point_in_polygon(point, polygon)`
+- `point_distance_to_polygon(point, polygon)`
+
+`create_polygon([])` trả dummy polygon tại gốc để app không crash khi config rỗng. Polygon ít hơn 3 đỉnh nhưng không rỗng sẽ raise `ValueError`.
+
+`ViolationZone` trong `rlvds/spatial/zones.py`:
+
+- Lưu vertices, zone id, color, thickness.
+- `is_in_zone(point)` dùng `point_in_polygon`.
+- `apply_mask(frame)` có sẵn nhưng không bắt buộc trong main flow.
+- `draw(frame)` vẽ polygon in-place.
+
+### Temporal
+
+`TrafficLightFSM` trong `rlvds/temporal/traffic_light.py`:
+
+```text
+RED -> GREEN -> YELLOW -> RED
 ```
 
-Đây là 4 đỉnh của vùng tứ giác giám sát trên mặt đường (vạch dừng đèn đỏ).
-
----
-
-## 9. Tầng Temporal — Logic thời gian
-
-### 9.1 Traffic Light FSM — `rlvds/temporal/traffic_light.py`
-
-**Class `TrafficLightFSM`** giả lập chu kỳ đèn giao thông.
-
-```
-      ┌──────────────────────────────────────────┐
-      │  RED (30s) → GREEN (30s) → YELLOW (3s)   │
-      │       ↑                         ↓        │
-      │       └─────────────────────────┘        │
-      └──────────────────────────────────────────┘
-```
-
-#### Cơ chế hoạt động
-
-- Dùng **wall-clock time** (không phải frame time)
-- `start()` → ghi nhận `start_time`, offset theo `initial_state`
-- `get_state()` → tính `elapsed % cycle_duration` → xác định phase hiện tại
-- Không cần gọi `update()` thủ công — FSM tự vận hành theo thời gian thực
+FSM dựa trên wall-clock time:
 
 ```python
 position = (time.time() - start_time) % cycle_duration
-
-if position < red_end:       return RED      # [0, 30)
-elif position < green_end:   return GREEN    # [30, 60)
-else:                         return YELLOW   # [60, 63)
 ```
 
-### 9.2 Violation Detector — `rlvds/temporal/violation.py`
+API chính:
 
-**Class `ViolationDetector`** kết hợp không gian + thời gian.
+- `start()`
+- `get_state() -> LightState`
+- `get_time_remaining()`
+- `is_red()`
+- `set_state(state)`
+- `reset()`
 
-#### `check_frame(detections)` → List[Detection]
+### ViolationDetector
 
-Duyệt từng detection, nếu:
-1. Đèn RED
-2. Anchor point trong zone
+File: `rlvds/temporal/violation.py`
 
-→ Đánh dấu `detection.is_violation = True`
+`check_frame(detections)`:
 
-#### `check_mock_violation(plate_text, detection)` → bool
+- Reset `det.is_violation`.
+- Nếu không đỏ: trả `[]`.
+- Nếu đỏ: đánh dấu detection có anchor nằm trong zone.
 
-Phiên bản "mock" dùng trong MiniPipeline:
-- Thêm logic chống trùng lặp: mỗi chu kỳ đèn đỏ, mỗi biển số chỉ ghi nhận 1 lần
-- Tự động clear `recorded_plates` khi đèn chuyển sang GREEN
+`check_mock_violation(plate_text, detection)`:
 
-#### `process_violation(detection, frame, plate_text)` → Violation
+- Lấy trạng thái đèn hiện tại.
+- Nếu không đỏ: `False`.
+- Nếu anchor trong zone: `True`.
+- Không yêu cầu OCR hợp lệ.
 
-- Kiểm tra duplicate
-- Lưu ảnh bằng chứng
-- Tạo đối tượng `Violation`
+`process_violation()` có duplicate set nội bộ và lưu ảnh đơn giản, nhưng luồng persistence chính trong app/CLI hiện dùng `ViolationRepository.record_violation()`.
 
----
+## 10. Persistence
 
-## 10. Tầng Tracking — Theo dõi đối tượng
+### Database
 
-### File: `rlvds/tracking/tracker.py`
+File: `rlvds/persistence/database.py`
 
-**Class `ObjectTracker`** implement SORT (Simple Online Realtime Tracking).
+`Database` là wrapper SQLite:
 
-#### Thuật toán SORT
-
-```
-Với mỗi frame:
-  1. Kalman predict vị trí mới cho tất cả track hiện có
-  2. Tính IOU matrix giữa tracked bboxes × detection bboxes
-  3. Hungarian algorithm → tìm cặp (track, detection) tối ưu
-  4. Update track đã match với detection mới
-  5. Tạo track mới cho detection không match
-  6. Đánh dấu "lost" cho track không match
-  7. Xóa track có time_since_update > max_age
-```
-
-#### Trạng thái track (lifecycle)
-
-```
-TENTATIVE → (đủ min_hits=3) → CONFIRMED
-                              → (mất > max_age=30) → DELETED
-```
-
-### File: `rlvds/tracking/track_state.py`
-
-**Class `KalmanBoxTracker`**:
-- State vector 8 chiều: `[cx, cy, area, aspect_ratio, vx, vy, v_area, v_ar]`
-- Constant velocity model
-- Dùng thư viện `filterpy` cho Kalman Filter
-
-### File: `rlvds/tracking/bbox_matcher.py`
-
-Hàm `compute_iou(box_a, box_b)` — tính Intersection over Union giữa 2 bounding box. Được dùng chung bởi cả tracker và OCR cache.
-
----
-
-## 11. Tầng Persistence — Lưu trữ
-
-### 11.1 Database — `rlvds/persistence/database.py`
-
-**Class `Database`** — thin wrapper quanh `sqlite3`:
-
-- Thread-safe với `RLock`
-- WAL mode, foreign keys ON
 - `check_same_thread=False`
-- Migration tự động: loại bỏ UNIQUE constraint trên `plate_text`
+- `row_factory=sqlite3.Row`
+- `RLock` cho thread-safety cơ bản.
+- `PRAGMA foreign_keys = ON`
+- `PRAGMA journal_mode = WAL`
+- `PRAGMA synchronous = NORMAL`
 
-### 11.2 Schema
+Schema table:
 
 ```sql
-CREATE TABLE violations (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    plate_text      TEXT NOT NULL,
-    violation_time  TEXT NOT NULL,        -- ISO 8601
-    light_state     TEXT NOT NULL,        -- RED/GREEN/YELLOW
-    status          TEXT DEFAULT 'VIOLATION',
-    full_image_path TEXT,                 -- ảnh scene
-    plate_image_path TEXT,                -- ảnh biển số đã preprocess
-    confidence      REAL DEFAULT 0.0,
-    zone_id         TEXT DEFAULT 'default',
-    created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
-    updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
+CREATE TABLE IF NOT EXISTS violations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    plate_text TEXT NOT NULL,
+    violation_time TEXT NOT NULL,
+    light_state TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'VIOLATION',
+    full_image_path TEXT,
+    plate_image_path TEXT,
+    confidence REAL NOT NULL DEFAULT 0.0,
+    zone_id TEXT NOT NULL DEFAULT 'default',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-
--- Indexes
-CREATE INDEX idx_violations_plate_text ON violations(plate_text);
-CREATE INDEX idx_violations_time ON violations(violation_time);
-CREATE INDEX idx_violations_light_state ON violations(light_state);
-CREATE INDEX idx_violations_status ON violations(status);
-CREATE INDEX idx_violations_zone ON violations(zone_id);
-
--- Trigger auto-update updated_at
-CREATE TRIGGER trg_violations_updated_at AFTER UPDATE ON violations ...
 ```
 
-### 11.3 Repository — `rlvds/persistence/repository.py`
+Indexes:
 
-**Class `ViolationRepository`** — data access layer đầy đủ:
+- `plate_text`
+- `violation_time`
+- `light_state`
+- `status`
+- `zone_id`
 
-| Method | Chức năng |
-|--------|----------|
-| `save(entity)` | Insert violation (có validate plate) |
-| `get_by_id(id)` | Lấy 1 record |
-| `get_all(limit, offset)` | Lấy danh sách (sorted by time DESC) |
-| `get_by_plate(plate)` | Tìm theo biển số |
-| `get_by_date_range(start, end)` | Lọc theo khoảng thời gian |
-| `update(id, patch)` | Cập nhật partial |
-| `delete(id)` | Xóa record + ảnh liên quan |
-| `count(**filters)` | Đếm với filter |
-| `record_violation(...)` | **Flow nguyên tử**: insert DB trước → lưu ảnh → update paths. Nếu lưu ảnh fail thì rollback DB. |
-| `save_violation_images(...)` | Lưu ảnh scene (có vẽ polygon + bbox) và ảnh plate |
-| `get_statistics(...)` | Thống kê dashboard |
-| `export_csv(path)` | Export ra CSV |
-| `clean_data()` | Chuẩn hóa + dedup dữ liệu |
+Migration:
 
-#### Cấu trúc thư mục lưu ảnh
+- Nếu DB cũ có `plate_text TEXT NOT NULL UNIQUE`, table được rebuild để bỏ UNIQUE constraint.
+- Lý do: một biển số có thể có nhiều vi phạm.
 
+### Models
+
+File: `rlvds/persistence/models.py`
+
+- `ViolationRecord`: model row DB, cho phép `OCR_FAILED_*`.
+- `ViolationCreate`: input strict, yêu cầu biển số hợp lệ.
+- `ViolationUpdate`: partial update.
+- `ViolationStatistics`, `DailyStat`: dashboard/statistics.
+
+`is_ocr_failed_plate()` nhận diện prefix `OCR_FAILED`.
+
+### Repository
+
+File: `rlvds/persistence/repository.py`
+
+CRUD:
+
+- `save(entity)`
+- `create(payload)`
+- `get_by_id(id)`
+- `get_all(limit, offset)`
+- `get_by_plate(plate_text)`
+- `get_all_by_plate(plate_text)`
+- `get_by_date_range(start, end)`
+- `update(id, patch)`
+- `update_status(id, status)`
+- `delete(id)`
+- `count(...)`
+
+Data tools:
+
+- `clean_data()`
+- `export_csv(path, filters...)`
+- `get_statistics(filters...)`
+
+Evidence flow:
+
+```text
+record_violation(...)
+    -> normalize plate or build OCR_FAILED id
+    -> save DB row
+    -> save_violation_images(...)
+    -> update row with image paths
+    -> rollback row/files if image save fails
 ```
-data/violations/
-├── scene/         # Ảnh toàn cảnh (có vẽ zone + bbox)
-├── plate/         # Ảnh biển số đã preprocess
-└── plate_debug/   # Ảnh biển số raw (chỉ khi debug=true)
+
+Image directories:
+
+```text
+violations_dir/
+├── scene/
+├── plate/
+└── plate_debug/
 ```
 
-#### Record flow (`record_violation`)
+`save_violation_images()` copies frame before drawing polygon/bbox/text. Plate image ưu tiên `preprocessed_plate`; nếu không có thì crop từ raw frame bằng bbox.
 
+Delete guard:
+
+```text
+_safe_remove_file(path)
+    -> resolve path
+    -> only unlink if path.relative_to(violations_dir) succeeds
 ```
-1. Tạo ViolationRecord → validate
-2. INSERT vào DB → lấy violation_id
-3. save_violation_images() → lưu scene + plate
-4. UPDATE full_image_path, plate_image_path
-5. Nếu bước 3-4 lỗi → DELETE row + xóa file → rollback toàn bộ
+
+## 11. Tracking
+
+Tracking nằm trong `rlvds/tracking/` và hiện là module độc lập/optional.
+
+`ObjectTracker` implement SORT-style:
+
+1. Predict bbox mới cho tracks bằng Kalman filter.
+2. Tính IOU matrix giữa tracks và detections.
+3. Match bằng Hungarian algorithm, fallback greedy nếu thiếu scipy.
+4. Update matched tracks.
+5. Tạo tracks mới cho detections chưa match.
+6. Mark lost cho tracks chưa match.
+7. Xóa tracks quá `max_age`.
+8. Trả về tracks `CONFIRMED`.
+
+`KalmanBoxTracker` dùng state vector:
+
+```text
+[cx, cy, area, aspect_ratio, vx, vy, v_area, v_ar]
 ```
 
----
+Tracking chưa được dùng làm điều kiện chính trong `ViolationDetector`. Điều kiện main flow vẫn là RED + anchor point trong polygon.
 
-## 12. Hệ thống Cấu hình
+## 12. Configuration
 
-### File: `config/settings.py`
+### Load order
 
-#### Thứ tự ưu tiên (cao → thấp)
+`config/settings.py` định nghĩa `Settings` và `get_settings()`:
 
-```
-Environment Variables (RLVDS_*)
-    ↓ ghi đè
-config/local.yaml (gitignored)
-    ↓ ghi đè
+```text
 config/default.yaml
-    ↓ fallback
-Giá trị mặc định trong Pydantic model
+    -> deep merge config/local.yaml nếu tồn tại
+    -> Pydantic Settings
+    -> env vars RLVDS_* override
 ```
 
-#### Cách override bằng ENV
+Pydantic source order trong code đặt env cao hơn YAML init values.
+
+`get_settings()` có `@lru_cache(maxsize=1)`, nên test hoặc script đổi env/config trong cùng process cần clear cache nếu muốn reload.
+
+### Env override
+
+Nested delimiter là `__`:
 
 ```bash
-# Cú pháp: RLVDS_{SECTION}__{KEY}=value
-RLVDS_DETECTION__CONFIDENCE_THRESHOLD=0.7
-RLVDS_DEBUG=true
-RLVDS_TEMPORAL__RED_DURATION_SEC=45
+RLVDS_DETECTION__DEVICE=cpu
+RLVDS_OCR_CACHE__ASYNC_OCR=false
 RLVDS_SPATIAL__VIOLATION_ZONE='[[100,200],[300,200],[300,400],[100,400]]'
 ```
 
-#### Cấu trúc Settings
+### Path resolution
 
-```python
-class Settings(BaseSettings):
-    video: VideoConfig           # fps, buffer_size, width, height
-    detection: DetectionConfig   # model_path, confidence, iou, image_size, device
-    tracking: TrackingConfig     # enabled, max_age, min_hits, iou_threshold
-    spatial: SpatialConfig       # violation_zone, zone_color
-    temporal: TemporalConfig     # red/green/yellow duration, initial_state
-    ocr: OCRConfig              # lang, use_gpu, confidence_threshold
-    ocr_cache: OCRCacheConfig   # enabled, iou_threshold, max_size, ttl_frames
-    preprocessing: PreprocessingConfig  # upscale, denoise, clahe params
-    database: DatabaseConfig    # url
-    paths: PathsConfig          # violations_dir, weights_dir, samples_dir
-    debug: bool
-    log_level: str
-```
+- `DatabaseConfig.url` chuyển SQLite path tương đối thành absolute path theo project root.
+- `PathsConfig` resolve `violations_dir`, `weights_dir`, `samples_dir` theo project root và tự tạo thư mục.
 
-#### Factory function
+### Config groups
 
-```python
-@lru_cache(maxsize=1)
-def get_settings() -> Settings:
-    # 1. Load default.yaml
-    # 2. Merge local.yaml (deep merge)
-    # 3. Pydantic tự động override bằng ENV
-    # 4. Cache kết quả
-```
+- `VideoConfig`
+- `DetectionConfig`
+- `TrackingConfig`
+- `SpatialConfig`
+- `TemporalConfig`
+- `OCRConfig`
+- `OCRCacheConfig`
+- `PreprocessingConfig`
+- `DatabaseConfig`
+- `PathsConfig`
 
----
+Một số field có default trong Pydantic dù không xuất hiện trong `default.yaml`; ví dụ `DetectionConfig.inference_interval_frames`.
 
-## 13. Pipeline & Entry Points
+## 13. Visualization và UI
 
-Hệ thống có **2 entry points** và **3 pipeline implementations**:
+`rlvds/utils/visualization.py` cung cấp helper vẽ:
 
-### Entry Points
+- Detections.
+- FPS.
+- Light state.
+- Zone overlay.
+- Resize frame hiển thị.
 
-#### `main.py` — CLI mode
-```bash
-python main.py --video data/samples/v1.mp4
-python main.py --camera 0
-python main.py --video test.mp4 --debug --no-display
-```
-- Dùng `Pipeline` (full)
-- Có OpenCV window hiển thị
-- Nhấn `q` để thoát
+Quy ước:
 
-#### `app.py` — Streamlit Web UI
-```bash
-streamlit run app.py
-```
-- Giao diện web với sidebar điều khiển
-- Chọn video, bật/tắt detection, điều chỉnh FPS
-- Hiển thị metrics: FPS, frame count, light state, violation count
+- Drawing thay đổi frame in-place.
+- App luôn copy raw frame trước khi vẽ.
+- Streamlit convert BGR -> RGB trước khi `st.image`.
 
-### Pipeline Implementations
+`draw_detections()` nhận cả result object từ `MiniPipeline`/`CachedPipeline` hoặc `Detection` tùy helper implementation; vì vậy các result cần giữ `.detection`, `.plate_text`, `.is_violation` ổn định.
 
-#### `Pipeline` (`core/pipeline.py`) — Full pipeline cho CLI
-- Khởi tạo tất cả component
-- Loop qua video, xử lý từng frame
-- Hiển thị OpenCV window
-- Persistence vào SQLite
+## 14. Docker runtime
 
-#### `MiniPipeline` (`core/mini_pipeline.py`) — Pipeline cơ bản
-- Flow đơn giản: detect → crop → OCR → violation check
-- Không cache
-- Mỗi frame xử lý độc lập
+`Dockerfile`:
 
-#### `CachedPipeline` (`core/cached_pipeline.py`) — Pipeline tối ưu
-- **Đây là pipeline chính được dùng trong app.py khi `ocr_cache.enabled=true`**
-- YOLO chạy mọi frame
-- PaddleOCR chỉ gọi khi cache miss
-- Xem chi tiết ở phần Caching bên dưới
+- Base `python:3.10-slim`.
+- Cài system deps cho OpenCV/ffmpeg.
+- Cài Paddle CPU mặc định qua build arg `PADDLE_PACKAGE=paddlepaddle==2.6.2`.
+- Loại `paddlepaddle-gpu` khỏi requirements Docker tạm thời.
+- Cài PyTorch CPU index.
+- Chạy `streamlit run app.py`.
 
----
-
-## 14. Caching & Tối ưu FPS
-
-### Vấn đề
-
-PaddleOCR chậm (~100-200ms mỗi lần gọi). Với video 30 FPS, nếu gọi OCR mỗi frame, FPS thực tế sẽ tụt xuống còn ~5 FPS. Một biển số thường xuất hiện trong nhiều frame liên tiếp → gọi OCR lặp lại là lãng phí.
-
-### Giải pháp: `CachedPipeline` + `PlateTrackCache`
-
-#### Cơ chế
-
-```
-Frame N:
-  YOLOv5 detect → tìm thấy bbox A
-    → cache.match(bbox A)
-      ├── HIT:   dùng plate_text từ cache (0ms)
-      └── MISS:  crop → preprocess → PaddleOCR → lưu vào cache (100-200ms)
-```
-
-#### PlateTrackCache (`ocr/plate_cache.py`)
-
-- **IOU-based matching:** So sánh bbox mới với bbox đã cache. Nếu IOU ≥ threshold → match.
-- **TTL:** Mỗi entry tự expire sau `ttl_frames` (default 150)
-- **Max size:** Tối đa `max_size` entries (default 50)
-- **Quality frames:** Chạy OCR tối đa `ocr_quality_frames` lần (default 3) cho cùng 1 biển số, lấy kết quả có confidence cao nhất
-
-#### Stats
-
-```python
-cache.hit_count    # số lần cache hit
-cache.miss_count   # số lần cache miss
-cache.hit_rate     # tỉ lệ hit (0.0 - 1.0)
-cache.size         # số entry hiện tại
-```
-
-### Luồng `CachedPipeline._resolve_plate_text()`
-
-```
-detection đến
-    │
-    ▼
-cache.match(bbox)
-    │
-    ├── MISS → OCR → add vào cache → return (text, from_cache=False)
-    │
-    └── HIT → ocr_count < quality_frames?
-              ├── YES → OCR thêm lần nữa → update cache → return (text, False)
-              └── NO  → return (cached_text, True)  # skip OCR hoàn toàn
-```
-
----
-
-## 15. Docker
-
-### Dockerfile
-
-- Base image: `python:3.10-slim`
-- Cài system deps: `ffmpeg`, `libgl1`, `libgomp1`, etc.
-- Mặc định cài **PaddlePaddle CPU** (`paddlepaddle==2.6.2`) để chạy được trên mọi máy
-- Build arg `PADDLE_PACKAGE` cho phép chuyển sang GPU
-
-### docker-compose.yml
+`docker-compose.yml`:
 
 ```yaml
-services:
-  rlvds:
-    build:
-      args:
-        PADDLE_PACKAGE: paddlepaddle==2.6.2  # hoặc paddlepaddle-gpu==2.6.2
-    ports:
-      - "8501:8501"
-    environment:
-      RLVDS_DATABASE__URL: sqlite:////tmp/rlvds/rlvds.db
-      RLVDS_DETECTION__DEVICE: cpu
-      RLVDS_OCR__USE_GPU: "false"
-    tmpfs:
-      - /tmp/rlvds  # DB trên RAM disk
-    volumes:
-      - ./data/samples:/app/data/samples:ro   # read-only
-      - ./weights:/app/weights:ro             # read-only
+ports:
+  - "8501:8501"
+environment:
+  RLVDS_DATABASE__URL: sqlite:////tmp/rlvds/rlvds.db
+  RLVDS_PATHS__VIOLATIONS_DIR: /tmp/rlvds/violations
+  RLVDS_DETECTION__DEVICE: cpu
+  RLVDS_OCR__USE_GPU: "false"
+tmpfs:
+  - /tmp/rlvds:rw,nosuid,nodev,size=512m
+volumes:
+  - ./data/samples:/app/data/samples:ro
+  - ./weights:/app/weights:ro
 ```
 
-#### DB trong tmpfs
+DB/evidence trong compose mặc định là dữ liệu tạm. Nếu cần giữ lại sau khi xóa container, thay tmpfs bằng bind mount hoặc volume.
 
-SQLite DB được đặt trong `/tmp/rlvds/` (tmpfs) → **mất khi container bị xóa**. Phù hợp cho demo/testing. Muốn persistent thì bỏ `tmpfs` và mount volume.
+## 15. Testing
 
----
+Test suite:
 
-## 16. Testing
-
-### Cấu trúc tests
-
-```
-tests/
-├── __init__.py
-├── test_detection.py        # Test YOLOv5 detector
-├── test_ocr_recognizer.py   # Test PaddleOCR engine
-├── test_ocr_pipeline.py     # Test MiniPipeline tích hợp
-├── test_ocr_cache.py        # Test PlateTrackCache
-├── test_polygon.py          # Test point-in-polygon
-├── test_traffic_light.py    # Test TrafficLightFSM
-├── test_persistence.py      # Test ViolationRepository
-└── fixtures/                # Test data (gitignored)
+```text
+tests/test_detection.py
+tests/test_ocr_pipeline.py
+tests/test_ocr_recognizer.py
+tests/test_ocr_cache.py
+tests/test_frame_integrity.py
+tests/test_polygon.py
+tests/test_traffic_light.py
+tests/test_persistence.py
 ```
 
-### Chạy test
+Lệnh theo khu vực:
 
 ```bash
-pytest tests/ -v
-pytest tests/test_ocr_cache.py -v    # chạy 1 file
-pytest tests/ -v -k "test_cache"     # chạy test theo keyword
+python -m pytest tests/test_detection.py
+python -m pytest tests/test_ocr_pipeline.py tests/test_ocr_recognizer.py
+python -m pytest tests/test_ocr_cache.py
+python -m pytest tests/test_frame_integrity.py
+python -m pytest tests/test_polygon.py
+python -m pytest tests/test_traffic_light.py
+python -m pytest tests/test_persistence.py
 ```
 
----
+Các test unit dùng fake object nhiều, thường không cần model thật. Những test quan trọng khi sửa frame/video:
 
-## 17. Phụ lục: Các quyết định thiết kế quan trọng
+- `tests/test_frame_integrity.py`: đảm bảo OCR/persistence dùng raw frame.
+- `tests/test_ocr_cache.py`: cache IOU, TTL, async OCR.
+- `tests/test_persistence.py`: OCR_FAILED, multiple violations per plate, safe delete.
 
-### 17.1 PaddleOCR luôn chạy trên CPU
+## 16. Quyết định thiết kế quan trọng
 
-```python
-# rlvds/ocr/recognizer.py
-use_gpu=False  # LUÔN CPU, bất kể config
-```
+### Raw frame tách khỏi display frame
 
-**Lý do:** PyTorch (CUDA 12.4) kéo theo cuDNN 9.x, trong khi PaddlePaddle 2.6.2 chỉ tương thích cuDNN 8.x. Chạy cả 2 trên GPU cùng lúc gây crash. Ảnh biển số nhỏ (~150x50px) nên CPU xử lý đủ nhanh.
+Overlay làm thay đổi pixel. Nếu dùng display frame để OCR hoặc save crop, bbox/text/polygon có thể nhiễu vào biển số. Vì vậy app và pipeline luôn copy raw frame trước khi vẽ.
 
-### 17.2 OCR Cache IOU threshold thấp (0.3)
+### OCR fail vẫn lưu evidence
 
-**Lý do:** Khi FPS thấp (≤5), displacement của bbox giữa các frame lớn → IOU cao hơn sẽ miss. Threshold 0.3 cân bằng giữa match chính xác và khả năng theo dõi biển số đang di chuyển.
+Một xe vượt đèn đỏ vẫn là event cần lưu dù OCR thất bại. Repository biến text không hợp lệ thành `OCR_FAILED_*` thay vì bỏ record.
 
-### 17.3 Bỏ UNIQUE constraint trên plate_text
+### PaddleOCR chạy CPU
 
-**Lý do:** Một biển số có thể vi phạm nhiều lần (nhiều chu kỳ đèn đỏ khác nhau). Migration tự động rebuild table để bỏ constraint này.
+PyTorch/CUDA và PaddlePaddle GPU dễ xung đột cuDNN. Ảnh biển số nhỏ nên OCR CPU là trade-off ổn định cho demo. Streamlit còn spawn OCR server CPU riêng để cách ly process.
 
-### 17.4 Anchor point = bottom-center của bbox
+### OCR cache dùng IOU, không dùng tracker chính
 
-**Lý do:** Điểm này gần mặt đường nhất, phản ánh chính xác vị trí xe so với vạch dừng. Nếu dùng center point, xe mới chớm vào zone đã bị tính là vi phạm (false positive).
+Cache chỉ cần biết bbox hiện tại giống bbox đã OCR trước đó hay không. IOU-based cache rẻ hơn tích hợp tracker đầy đủ và đủ tốt cho việc giảm số lần gọi OCR.
 
-### 17.5 Mock violation check vs Check đầy đủ
+### Tracking chưa xác nhận vi phạm
 
-`check_mock_violation()` trong MiniPipeline/CachedPipeline kiểm tra nhanh (point-in-zone + is_red). `check_frame()` trong ViolationDetector đầy đủ hơn, có thể mở rộng sau này.
+`tracking/` đã có SORT-style tracker, nhưng violation flow hiện không yêu cầu track đang di chuyển. Nếu sau này cần giảm false positive, tracking nên được tích hợp vào `ViolationDetector` hoặc một rule layer mới.
 
-### 17.6 Protocol-based typing thay vì ABC
+### Repository cho phép nhiều record cùng plate
 
-```python
-class DetectorLike(Protocol):
-    def detect(self, frame: np.ndarray) -> List[Detection]: ...
-    def crop_plate(self, detection, frame, expand_ratio) -> np.ndarray: ...
-```
+Schema không UNIQUE trên `plate_text` vì một xe có thể vi phạm nhiều lần. Duplicate control nếu cần nên là logic theo session/event, không phải constraint DB toàn cục.
 
-Dùng `Protocol` cho structural subtyping — không cần kế thừa, chỉ cần object có đúng method signature. Cho phép test với mock dễ dàng hơn.
+### `config/local.yaml` là nơi override local
 
----
-
-## Tổng kết nhanh — Cách hệ thống vận hành
-
-1. **Config** được load từ YAML → Pydantic validate → ENV override
-2. **Pipeline** khởi tạo tất cả component: detector, OCR, zone, traffic light, cache, DB
-3. **VideoSource** đọc từng frame từ file/camera
-4. **YOLOv5** detect vị trí biển số → trả về `List[Detection]`
-5. **CachedPipeline** kiểm tra cache: nếu bbox đã OCR → reuse, nếu chưa → crop + preprocess + PaddleOCR
-6. **Post-process** chuẩn hóa text biển số về format VN
-7. **ViolationDetector** kiểm tra: đèn đỏ? + anchor trong zone? → `is_violation = True`
-8. Nếu vi phạm → **ViolationRepository** lưu ảnh + DB
-9. **Visualization** vẽ FPS, bbox, zone overlay, light status lên frame
-10. **Streamlit** hiển thị frame đã annotated + metrics real-time
+Không nên sửa `config/default.yaml` chỉ để chạy trên máy cá nhân. Dùng `config/local.yaml` hoặc env vars để đổi path, device, polygon và threshold.

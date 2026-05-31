@@ -12,6 +12,12 @@ from rlvds.ocr.postprocess import check_valid_plate, format_plate
 
 _VALID_LIGHT_STATES = {"RED", "GREEN", "YELLOW", "UNKNOWN"}
 _DEFAULT_STATUS = "VIOLATION"
+OCR_FAILED_STATUS = "OCR_FAILED"
+OCR_FAILED_PLATE_PREFIX = "OCR_FAILED"
+
+
+def is_ocr_failed_plate(plate_text: str | None) -> bool:
+    return str(plate_text or "").strip().upper().startswith(OCR_FAILED_PLATE_PREFIX)
 
 
 def _to_iso(value: datetime | str) -> str:
@@ -24,6 +30,8 @@ def _normalize_plate(value: str) -> str:
     text = str(value or "").strip().upper()
     if not text:
         return ""
+    if is_ocr_failed_plate(text):
+        return "".join(c if c.isalnum() or c in "_-" else "_" for c in text)
     return format_plate(text)
 
 

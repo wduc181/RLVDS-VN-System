@@ -4,7 +4,7 @@ from types import MethodType, SimpleNamespace
 
 import numpy as np
 
-from app import _process_stream_frame
+from app import _decode_uploaded_image, _process_stream_frame, _process_uploaded_image
 from rlvds.core.base import Detection
 from rlvds.core.pipeline import Pipeline
 
@@ -36,9 +36,14 @@ class _Detector:
     def __init__(self, detection: Detection) -> None:
         self.detection = detection
         self.calls: list[tuple[np.ndarray, float]] = []
+        self.detect_frame_pixel: np.ndarray | None = None
 
     def is_available(self) -> bool:
         return True
+
+    def detect(self, frame: np.ndarray) -> list[Detection]:
+        self.detect_frame_pixel = frame[6, 6].copy()
+        return [self.detection]
 
     def crop_plate(
         self,
@@ -89,6 +94,15 @@ class _Preprocessor:
     def run_pipeline(self, image: np.ndarray) -> np.ndarray:
         self.crop = image.copy()
         return image.copy()
+
+
+class _OCR:
+    def __init__(self) -> None:
+        self.crop: np.ndarray | None = None
+
+    def recognize_with_confidence(self, image: np.ndarray):
+        self.crop = image.copy()
+        return SimpleNamespace(text="30A-12345", confidence=0.91)
 
 
 class _Repo:
@@ -202,3 +216,35 @@ def test_streamlit_frame_processing_uses_raw_frame_for_pipeline_and_persistence(
     assert np.array_equal(repo.raw_plate, processing_pipeline.ocr_crop)
     assert [call[1] for call in detector.calls] == [0.5, 0.5]
     assert not np.array_equal(display_frame[6, 6], RAW_PIXEL)
+
+
+def test_streamlit_image_ocr_uses_raw_image_for_detection_crop_and_ocr() -> None:
+    frame = _frame()
+    det = Detection(bbox=(5, 5, 9, 9), confidence=0.9)
+    detector = _Detector(det)
+    ocr = _OCR()
+    settings = _settings()
+
+    display_frame, results = _process_uploaded_image(
+        raw_image=frame,
+        detector=detector,
+        ocr_engine=ocr,
+        settings=settings,
+    )
+
+    assert len(results) == 1
+    assert results[0].plate_text == "30A-12345"
+    assert results[0].ocr_confidence == 0.91
+    assert detector.detect_frame_pixel is not None
+    assert ocr.crop is not None
+    assert np.array_equal(detector.detect_frame_pixel, RAW_PIXEL)
+    assert np.array_equal(results[0].crop, ocr.crop)
+    assert np.array_equal(frame[5, 5], RAW_PIXEL)
+    assert not np.array_equal(display_frame[5, 5], RAW_PIXEL)
+    assert [call[1] for call in detector.calls] == [0.5]
+
+
+def test_uploaded_image_decode_returns_none_for_invalid_bytes() -> None:
+    uploaded_file = SimpleNamespace(getvalue=lambda: b"not an image")
+
+    assert _decode_uploaded_image(uploaded_file) is None

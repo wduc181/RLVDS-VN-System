@@ -64,6 +64,11 @@ class LicensePlateDetector(BaseDetector):
         """
         try:
             import torch
+            import pathlib
+            import platform
+
+            if platform.system() == "Windows":
+                pathlib.PosixPath = pathlib.WindowsPath
 
             if not Path(path).exists():
                 logger.warning(f"Model file not found: {path}")

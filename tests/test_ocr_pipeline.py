@@ -53,6 +53,12 @@ def test_format_and_validate_legacy_4_digit_plate() -> None:
     assert check_valid_plate(text) is True
 
 
+def test_format_and_validate_two_letter_series_plate() -> None:
+    text = format_plate("29LD-001.43")
+    assert text == "29LD-00143"
+    assert check_valid_plate(text) is True
+
+
 def test_clean_plate_text_series_a1_and_numeric_tail() -> None:
     # OCR commonly confuses B in numeric tail with digit 8.
     text = clean_plate_text("30A112B45")
@@ -83,6 +89,22 @@ def test_mock_violation_check_true_when_red_and_inside_zone() -> None:
         zone=zone,
         traffic_light=fsm,
     )
+    assert ok is True
+
+
+def test_mock_violation_check_true_even_when_ocr_unknown() -> None:
+    zone = ViolationZone(vertices=[[0, 0], [100, 0], [100, 100], [0, 100]])
+    fsm = TrafficLightFSM(red_sec=30, green_sec=30, yellow_sec=3, initial_state="RED")
+    fsm.start()
+    det = Detection(bbox=(10, 10, 50, 60), confidence=0.9)
+
+    ok = mock_violation_check(
+        plate_text="unknown",
+        detection=det,
+        zone=zone,
+        traffic_light=fsm,
+    )
+
     assert ok is True
 
 

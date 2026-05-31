@@ -17,10 +17,12 @@ from rlvds.ocr.postprocess import check_valid_plate, format_plate
 from rlvds.persistence.database import Database
 from rlvds.persistence.models import (
     DailyStat,
+    OCR_FAILED_STATUS,
     ViolationCreate,
     ViolationRecord,
     ViolationStatistics,
     ViolationUpdate,
+    is_ocr_failed_plate,
 )
 from rlvds.utils.logger import get_logger
 
@@ -57,7 +59,7 @@ class ViolationRepository(BaseRepository):
 
     def save(self, entity: Any) -> int | None:
         record = self._normalize_entity(entity)
-        if not check_valid_plate(record.plate_text):
+        if not self._can_store_plate(record):
             logger.warning("Skip invalid plate_text: %s", record.plate_text)
             return None
         cur = self._db.execute(
@@ -219,10 +221,10 @@ class ViolationRepository(BaseRepository):
         return row is not None
 
     def clean_data(self) -> int:
-        """Normalize plates, remove invalid records and deduplicate by (plate, time)."""
+        """Normalize plates, remove invalid records and deduplicate by plate."""
         rows = self._db.query_all(
             """
-            SELECT id, plate_text, violation_time
+            SELECT id, plate_text, violation_time, status
             FROM violations
             ORDER BY id ASC;
             """
@@ -233,6 +235,9 @@ class ViolationRepository(BaseRepository):
 
         for row in rows:
             raw_plate = str(row["plate_text"] or "")
+            if self._is_ocr_failed_record(raw_plate, str(row["status"] or "")):
+                continue
+
             try:
                 normalized = self._normalize_plate_text(raw_plate)
             except Exception:
@@ -243,12 +248,12 @@ class ViolationRepository(BaseRepository):
                 continue
 
             violation_time = str(row["violation_time"] or "")
-            dedup_key = (normalized, violation_time)
-            if dedup_key in seen:
+            key = (normalized, violation_time)
+            if key in seen:
                 ids_to_remove.append(int(row["id"]))
                 continue
 
-            seen.add(dedup_key)
+            seen.add(key)
             if normalized != raw_plate:
                 updates.append((normalized, int(row["id"])))
 
@@ -445,10 +450,13 @@ class ViolationRepository(BaseRepository):
         event_time: datetime | None = None,
     ) -> int | None:
         """Atomic flow: reserve DB row -> save images -> update paths."""
-        if not plate_text or plate_text == "unknown":
-            return None
-
         event_time = event_time or datetime.now()
+        plate_text, status = self._normalize_recording_plate(
+            plate_text=plate_text,
+            status=status,
+            detection=detection,
+            event_time=event_time,
+        )
         rec = ViolationRecord(
             plate_text=plate_text,
             violation_time=event_time.isoformat(timespec="seconds"),
@@ -461,7 +469,7 @@ class ViolationRepository(BaseRepository):
         )
         violation_id = self.save(rec)
         if violation_id is None:
-            logger.debug("record_violation skipped invalid plate: %s", plate_text)
+            logger.debug("record_violation skipped duplicated plate: %s", plate_text)
             return None
 
         full_image_path: str | None = None
@@ -499,6 +507,33 @@ class ViolationRepository(BaseRepository):
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _can_store_plate(record: ViolationRecord) -> bool:
+        if check_valid_plate(record.plate_text):
+            return True
+        return ViolationRepository._is_ocr_failed_record(record.plate_text, record.status)
+
+    @staticmethod
+    def _is_ocr_failed_record(plate_text: str, status: str) -> bool:
+        return str(status or "").upper() == OCR_FAILED_STATUS and is_ocr_failed_plate(plate_text)
+
+    @staticmethod
+    def _normalize_recording_plate(
+        *,
+        plate_text: str,
+        status: str,
+        detection: Detection,
+        event_time: datetime,
+    ) -> tuple[str, str]:
+        formatted = format_plate(str(plate_text or ""))
+        if check_valid_plate(formatted):
+            return formatted, status
+
+        x1, y1, x2, y2 = detection.bbox
+        suffix = event_time.strftime("%Y%m%d_%H%M%S_%f")
+        failed_text = f"OCR_FAILED_{suffix}_{x1}_{y1}_{x2}_{y2}"
+        return failed_text, OCR_FAILED_STATUS
+
+    @staticmethod
     def _sanitize_plate(plate_text: str) -> str:
         safe = re.sub(r"[^A-Za-z0-9_-]", "_", plate_text.strip())
         return safe or "unknown"
@@ -528,12 +563,14 @@ class ViolationRepository(BaseRepository):
         candidate = plate_text.strip()
         if not candidate:
             return None
+        if is_ocr_failed_plate(candidate):
+            return "".join(c if c.isalnum() or c in "_-" else "_" for c in candidate.upper())
 
-        # Delegate to OCR postprocessing helpers to validate and format.
-        normalized = format_plate(candidate)
-        if not normalized or not check_valid_plate(normalized):
+        # Delegate to OCR postprocessing helper which encapsulates plate rules.
+        formatted = format_plate(candidate)
+        if not check_valid_plate(formatted):
             return None
-        return normalized
+        return formatted
     def _build_filters(
         self,
         *,

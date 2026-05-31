@@ -54,6 +54,12 @@ class Pipeline:
             lang=self._cfg.ocr.lang,
             use_gpu=self._cfg.ocr.use_gpu,
             confidence_threshold=self._cfg.ocr.confidence_threshold,
+            det_model_dir=self._cfg.ocr.det_model_dir,
+            rec_model_dir=self._cfg.ocr.rec_model_dir,
+            enable_mkldnn=self._cfg.ocr.enable_mkldnn,
+            cpu_threads=self._cfg.ocr.cpu_threads,
+            use_angle_cls=self._cfg.ocr.use_angle_cls,
+            enhanced_fallback=self._cfg.ocr.enhanced_fallback,
         )
         self.zone = ViolationZone(
             vertices=self._cfg.spatial.violation_zone,
@@ -161,7 +167,10 @@ class Pipeline:
         if self.db is not None:
             self.db.disconnect()
             self.db = None
-        cv2.destroyAllWindows()
+        try:
+            cv2.destroyAllWindows()
+        except cv2.error as exc:
+            logger.debug("OpenCV window cleanup skipped: %s", exc)
         logger.info("Pipeline stopped")
 
     def _start(self, source: str | int) -> None:
@@ -228,7 +237,7 @@ class Pipeline:
             return 0
         saved = 0
         for result in results:
-            if not result.is_violation or result.plate_text == "unknown":
+            if not result.is_violation:
                 continue
             det = result.detection
             crop = self.detector.crop_plate(

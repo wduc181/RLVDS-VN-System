@@ -24,7 +24,6 @@ detection:
   confidence_threshold: 0.5                # Ngưỡng confidence (0.0–1.0)
   iou_threshold: 0.45                      # Ngưỡng IoU cho NMS
   image_size: 640                          # Input size cho model
-  inference_interval_frames: 3             # Chạy YOLO/OCR mỗi N frame hiển thị
   device: "auto"                           # "auto" | "cuda:0" | "cpu"
 
 # --- Tracking ---
@@ -54,19 +53,24 @@ ocr:
   det_model_dir: ""          # Để trống = tự download model mặc định
   rec_model_dir: ""          # Để trống = tự download model mặc định
   confidence_threshold: 0.6  # Ngưỡng confidence cho OCR result
+  use_angle_cls: false       # Tắt angle classifier cho crop biển số ngang
+  enable_mkldnn: false       # Tắt MKLDNN/oneDNN để tránh lỗi primitive trên một số CPU
+  cpu_threads: 2             # Số luồng CPU PaddleOCR sử dụng
+  enhanced_fallback: false   # Video ưu tiên FPS; tab upload ảnh bật riêng khi cần đọc kỹ hơn
 
 # --- OCR Cache (Frame Skipping) ---
 ocr_cache:
   enabled: true              # Bật caching để tối ưu FPS
+  async_ocr: true            # Bật OCR bất đồng bộ (chạy ngầm) để tránh tụt FPS
   iou_threshold: 0.3         # Ngưỡng IOU match bbox (thấp vì FPS thấp → displacement lớn)
   max_cache_size: 50          # Số plate tối đa trong cache
   cache_ttl_frames: 150       # Số frame giữ entry trước khi expire
-  ocr_quality_frames: 1       # Số lần OCR tối đa cho cùng plate (1 = ưu tiên FPS)
+  ocr_quality_frames: 3       # Số lần OCR tối đa cho cùng plate (1 = tối ưu CPU/FPS, 3 = chất lượng tốt hơn)
 
 # --- Image Preprocessing (crop + upscale + denoise + CLAHE) ---
 preprocessing:
   upscale_factor: 2.0           # Hệ số phóng to ảnh biển số (cv2.INTER_CUBIC)
-  denoise_h: 10.0                # Cường độ lọc noise; cao hơn = mịn hơn, mất chi tiết hơn
+  denoise_h: 5.0                # Cường độ lọc noise; cao hơn = mịn hơn, mất chi tiết hơn
   denoise_template_window: 7    # Template window size (px, lẻ)
   denoise_search_window: 21     # Search window size (px, lẻ)
   clahe_clip_limit: 2.0         # Clip limit CLAHE; cao hơn = tương phản mạnh hơn

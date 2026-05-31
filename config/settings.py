@@ -139,6 +139,10 @@ class OCRConfig(BaseModel):
     det_model_dir: str = ""
     rec_model_dir: str = ""
     confidence_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
+    use_angle_cls: bool = False
+    enable_mkldnn: bool = False
+    cpu_threads: int = Field(default=2, ge=1)
+    enhanced_fallback: bool = False
 
 
 class OCRCacheConfig(BaseModel):
@@ -149,6 +153,7 @@ class OCRCacheConfig(BaseModel):
 
     Attributes:
         enabled: Bật/tắt OCR caching.
+        async_ocr: Bật/tắt chạy OCR bất đồng bộ ở luồng ngầm.
         iou_threshold: Ngưỡng IOU tối thiểu để match bbox cũ-mới.
             Mặc định 0.3 vì FPS thấp (≤5) gây displacement lớn giữa frames.
         max_cache_size: Số plate tối đa trong cache.
@@ -158,6 +163,7 @@ class OCRCacheConfig(BaseModel):
     """
 
     enabled: bool = True
+    async_ocr: bool = True
     iou_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
     max_cache_size: int = Field(default=50, ge=1)
     cache_ttl_frames: int = Field(default=150, ge=1)

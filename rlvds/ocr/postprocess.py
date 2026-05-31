@@ -8,6 +8,20 @@ import cv2
 import numpy as np
 
 _INVALID_PROVINCE_CODES = {"13", "42", "44", "45", "46", "87", "91", "96"}
+_TWO_LETTER_SERIES = {
+    "CD",
+    "CV",
+    "DA",
+    "HC",
+    "KT",
+    "LD",
+    "MD",
+    "MK",
+    "NG",
+    "NN",
+    "QT",
+    "TD",
+}
 
 
 def upscale_image(image: np.ndarray, scale: float = 2.0) -> np.ndarray:
@@ -40,9 +54,9 @@ def adjust_contrast(image: np.ndarray) -> np.ndarray:
 
 def preprocess_image(image: np.ndarray) -> np.ndarray:
     """Standard OCR preprocessing pipeline."""
-    upscaled = upscale_image(image)
-    denoised = denoise_image(upscaled)
-    return adjust_contrast(denoised)
+    denoised = denoise_image(image)
+    upscaled = upscale_image(denoised)
+    return adjust_contrast(upscaled)
 
 
 def clean_plate_text(raw_text: str) -> str:
@@ -61,17 +75,29 @@ def clean_plate_text(raw_text: str) -> str:
     chars[0] = _to_digit(chars[0])
     chars[1] = _to_digit(chars[1])
 
+    two_letter_series = ""
+    if len(chars) >= 4:
+        two_letter_series = f"{_to_alpha(chars[2])}{_to_alpha(chars[3])}"
+
     # Heuristic to determine prefix end:
     # - 2-digit province + 1 alpha series => prefix len 3
     # - 2-digit province + alpha+digit series (e.g. A1) => prefix len 4
-    if len(chars) >= 9 and chars[3].isdigit():
+    # - 2-digit province + special two-letter series (e.g. LD/NN/NG) => prefix len 4
+    if len(chars) >= 4 and two_letter_series in _TWO_LETTER_SERIES:
         prefix_end = 4
+        two_letter_prefix = True
+    elif len(chars) >= 9 and chars[3].isdigit():
+        prefix_end = 4
+        two_letter_prefix = False
     else:
         prefix_end = 3
+        two_letter_prefix = False
 
     # Fix chars in prefix (after province code)
     for i in range(2, min(prefix_end, len(chars))):
-        if i == 2:
+        if two_letter_prefix:
+            chars[i] = _to_alpha(chars[i])
+        elif i == 2:
             chars[i] = _to_alpha(chars[i])
         else:
             chars[i] = _to_digit(chars[i])
@@ -130,10 +156,12 @@ def check_valid_plate(plate: str) -> bool:
 
     if len(parts) == 2:
         prefix = parts[0]
-        if not re.fullmatch(r"\d{2}[A-Z]\d?", prefix):
+        if not _valid_plate_prefix(prefix):
             return False
     elif len(parts) == 3:
-        if len(parts[0]) != 2 or not re.fullmatch(r"[A-Z]\d?", parts[1]):
+        if len(parts[0]) != 2 or not parts[0].isdigit():
+            return False
+        if not _valid_plate_series(parts[1]):
             return False
     else:
         return False
@@ -146,6 +174,20 @@ def check_valid_plate(plate: str) -> bool:
         return False
 
     return True
+
+
+def _valid_plate_prefix(prefix: str) -> bool:
+    if re.fullmatch(r"\d{2}[A-Z]\d?", prefix):
+        return True
+    return (
+        len(prefix) == 4
+        and prefix[:2].isdigit()
+        and prefix[2:] in _TWO_LETTER_SERIES
+    )
+
+
+def _valid_plate_series(series: str) -> bool:
+    return bool(re.fullmatch(r"[A-Z]\d?", series)) or series in _TWO_LETTER_SERIES
 
 
 def to_gray(image: np.ndarray) -> np.ndarray:

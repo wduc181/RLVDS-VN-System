@@ -99,7 +99,8 @@ class CachedPipeline:
         violation_detector: ViolationDetector,
         cache: PlateTrackCache,
         crop_expand_ratio: float = 0.15,
-        ocr_quality_frames: int = 1,
+        ocr_quality_frames: int = 3,
+        async_ocr: bool = False,
     ) -> None:
         self._detector = detector
         self._ocr = ocr
@@ -108,6 +109,15 @@ class CachedPipeline:
         self._crop_expand_ratio = crop_expand_ratio
         self._ocr_quality_frames = ocr_quality_frames
         self._frame_idx: int = 0
+        
+        # Async OCR setup
+        self._async_ocr = async_ocr
+        if self._async_ocr:
+            from concurrent.futures import ThreadPoolExecutor
+            import threading
+            self._executor = ThreadPoolExecutor(max_workers=1)
+            self._lock = threading.Lock()
+            self._pending_jobs: set[int] = set()
 
     def process_frame(self, frame: np.ndarray) -> List[CachedPipelineResult]:
         """Xử lý một frame với OCR caching.
@@ -167,44 +177,116 @@ class CachedPipeline:
         cached: Optional[CachedPlate] = self._cache.match(bbox, self._frame_idx)
 
         if cached is not None:
-            # Cache HIT — kiểm tra xem đã đủ quality frames chưa
-            if cached.ocr_count < self._ocr_quality_frames:
-                # Chạy thêm OCR để cải thiện confidence
-                plate_text, ocr_conf = self._run_ocr(det, frame)
-                if plate_text != "unknown":
-                    self._cache.add_or_update(
-                        bbox=bbox,
-                        plate_text=plate_text,
-                        confidence=ocr_conf,
-                        frame_idx=self._frame_idx,
-                    )
-                else:
-                    # OCR trả "unknown" — vẫn phải tăng ocr_count
-                    # để tránh vòng lặp vô hạn (Infinite OCR Loop)
-                    self._cache.add_or_update(
-                        bbox=bbox,
-                        plate_text=cached.plate_text,
-                        confidence=cached.confidence,
-                        frame_idx=self._frame_idx,
-                    )
-                # Bug 4 fix: đã gọi OCR → from_cache=False
-                best_text = plate_text if plate_text != "unknown" else cached.plate_text
-                return best_text, False
+            # Cache HIT
+            if self._async_ocr:
+                # Flow bất đồng bộ (Cache HIT)
+                if cached.ocr_count < self._ocr_quality_frames:
+                    with self._lock:
+                        is_pending = id(cached) in self._pending_jobs
+                    if not is_pending:
+                        self._submit_ocr_job(cached, det, frame)
+                    return cached.plate_text, False
+                return cached.plate_text, True
+            else:
+                # Flow đồng bộ (Original Cache HIT)
+                if cached.ocr_count < self._ocr_quality_frames:
+                    # Chạy thêm OCR để cải thiện confidence
+                    plate_text, ocr_conf = self._run_ocr(det, frame)
+                    if plate_text != "unknown":
+                        self._cache.add_or_update(
+                            bbox=bbox,
+                            plate_text=plate_text,
+                            confidence=ocr_conf,
+                            frame_idx=self._frame_idx,
+                        )
+                    else:
+                        self._cache.add_or_update(
+                            bbox=bbox,
+                            plate_text=cached.plate_text,
+                            confidence=cached.confidence,
+                            frame_idx=self._frame_idx,
+                        )
+                    best_text = plate_text if plate_text != "unknown" else cached.plate_text
+                    return best_text, False
 
-            # Đã đủ OCR quality → reuse hoàn toàn
-            return cached.plate_text, True
+                # Đã đủ OCR quality → reuse hoàn toàn
+                return cached.plate_text, True
 
-        # Cache MISS — chạy OCR
-        plate_text, ocr_conf = self._run_ocr(det, frame)
-        if plate_text != "unknown":
-            self._cache.add_or_update(
+        # Cache MISS
+        if self._async_ocr:
+            # Flow bất đồng bộ (Cache MISS)
+            # Thêm ngay entry tạm với text "unknown" để các frame sau match bbox qua IOU,
+            # tránh sinh ra nhiều task chạy ngầm trùng lặp.
+            cached = self._cache.add_or_update(
                 bbox=bbox,
-                plate_text=plate_text,
-                confidence=ocr_conf,
+                plate_text="unknown",
+                confidence=0.0,
                 frame_idx=self._frame_idx,
             )
+            # ocr_count khởi tạo là 1 cho lần chạy này
+            cached.ocr_count = 1
+            self._submit_ocr_job(cached, det, frame)
+            return cached.plate_text, False
+        else:
+            # Flow đồng bộ (Original Cache MISS)
+            plate_text, ocr_conf = self._run_ocr(det, frame)
+            if plate_text != "unknown":
+                self._cache.add_or_update(
+                    bbox=bbox,
+                    plate_text=plate_text,
+                    confidence=ocr_conf,
+                    frame_idx=self._frame_idx,
+                )
+            return plate_text, False
 
-        return plate_text, False
+    def _submit_ocr_job(
+        self,
+        cached: CachedPlate,
+        det: Detection,
+        frame: np.ndarray,
+    ) -> None:
+        """Gửi tác vụ OCR chạy ngầm."""
+        crop = self._detector.crop_plate(
+            det,
+            frame,
+            expand_ratio=self._crop_expand_ratio,
+        )
+        if crop.size == 0:
+            return
+
+        cached_id = id(cached)
+        with self._lock:
+            self._pending_jobs.add(cached_id)
+
+        future = self._executor.submit(self._async_ocr_worker, crop)
+
+        def done_callback(f):
+            try:
+                plate_text, confidence = f.result()
+                with self._lock:
+                    if plate_text != "unknown":
+                        # Chỉ cập nhật khi text tốt hơn hoặc text trước đó là placeholder "unknown"
+                        if confidence > cached.confidence or cached.plate_text == "unknown":
+                            cached.plate_text = plate_text
+                            cached.confidence = confidence
+                    # Luôn tăng ocr_count để tránh vòng lặp vô hạn
+                    cached.ocr_count += 1
+            except Exception as e:
+                logger.error("Async OCR job failed: %s", e)
+            finally:
+                with self._lock:
+                    self._pending_jobs.discard(cached_id)
+
+        future.add_done_callback(done_callback)
+
+    def _async_ocr_worker(self, crop: np.ndarray) -> tuple[str, float]:
+        """Worker chạy ngầm cho việc crop và OCR."""
+        try:
+            result = self._ocr.recognize_with_confidence(crop)
+            return result.text, result.confidence
+        except Exception as e:
+            logger.error("Error in async OCR worker: %s", e)
+            return "unknown", 0.0
 
     def _run_ocr(self, det: Detection, frame: np.ndarray) -> tuple[str, float]:
         """Crop và chạy OCR cho một detection.
@@ -221,6 +303,9 @@ class CachedPipeline:
             frame,
             expand_ratio=self._crop_expand_ratio,
         )
+        if crop.size == 0:
+            return "unknown", 0.0
+
         result = self._ocr.recognize_with_confidence(crop)
         return result.text, result.confidence
 
@@ -238,4 +323,13 @@ class CachedPipeline:
         """Reset pipeline state (cache + frame counter)."""
         self._cache.clear()
         self._frame_idx = 0
+        if self._async_ocr:
+            with self._lock:
+                self._pending_jobs.clear()
         logger.info("CachedPipeline reset")
+
+    def close(self) -> None:
+        """Giải phóng tài nguyên executor khi dừng pipeline."""
+        if self._async_ocr:
+            logger.info("Shutting down CachedPipeline ThreadPoolExecutor...")
+            self._executor.shutdown(wait=False)
