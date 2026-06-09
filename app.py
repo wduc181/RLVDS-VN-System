@@ -531,6 +531,13 @@ def main() -> None:
             f"{settings.temporal.yellow_duration_sec} (s)"
         )
 
+        st.subheader("Speed Warning")
+        st.caption(
+            f"{'Enabled' if settings.speed.enabled else 'Disabled'} | "
+            f"limit {settings.speed.limit_kmh:.1f} km/h | "
+            f"{settings.speed.meters_per_pixel:.4f} m/px"
+        )
+
         is_running = st.session_state.get("running", False)
         should_start = st.session_state.get("should_start", False)
         effective_running = is_running or should_start
