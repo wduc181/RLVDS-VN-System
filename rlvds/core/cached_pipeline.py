@@ -16,7 +16,7 @@ Thư viện sử dụng:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Protocol
+from typing import List, Optional, Protocol, Sequence
 
 import numpy as np
 
@@ -24,6 +24,7 @@ from rlvds.core.base import Detection
 from rlvds.ocr.plate_cache import CachedPlate, PlateTrackCache
 from rlvds.ocr.recognizer import OCRResult
 from rlvds.temporal.violation import ViolationDetector
+from rlvds.tracking.speed_estimator import SpeedEstimate
 from rlvds.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -54,6 +55,19 @@ class OCRLike(Protocol):
         ...
 
 
+class SpeedEstimatorLike(Protocol):
+    """Protocol cho module ước lượng tốc độ."""
+
+    def estimate(
+        self,
+        detections: Sequence[Detection],
+        *,
+        frame_idx: int | None = None,
+        fps: float | None = None,
+    ) -> list[SpeedEstimate]:
+        ...
+
+
 @dataclass
 class CachedPipelineResult:
     """Kết quả xử lý frame từ CachedPipeline.
@@ -63,12 +77,18 @@ class CachedPipelineResult:
         detection: Detection gốc từ YOLO.
         is_violation: Cờ vi phạm.
         from_cache: True nếu plate_text lấy từ cache (skip OCR).
+        track_id: ID track tốc độ nếu speed estimator bật.
+        speed_kmh: Tốc độ ước lượng đã làm mượt.
+        is_speeding: True nếu tốc độ vượt ngưỡng cảnh báo.
     """
 
     plate_text: str
     detection: Detection
     is_violation: bool
     from_cache: bool = False
+    track_id: int | None = None
+    speed_kmh: float | None = None
+    is_speeding: bool = False
 
 
 class CachedPipeline:
@@ -101,6 +121,7 @@ class CachedPipeline:
         crop_expand_ratio: float = 0.15,
         ocr_quality_frames: int = 3,
         async_ocr: bool = False,
+        speed_estimator: SpeedEstimatorLike | None = None,
     ) -> None:
         self._detector = detector
         self._ocr = ocr
@@ -109,6 +130,7 @@ class CachedPipeline:
         self._crop_expand_ratio = crop_expand_ratio
         self._ocr_quality_frames = ocr_quality_frames
         self._frame_idx: int = 0
+        self._speed_estimator = speed_estimator
         
         # Async OCR setup
         self._async_ocr = async_ocr
@@ -119,7 +141,13 @@ class CachedPipeline:
             self._lock = threading.Lock()
             self._pending_jobs: set[int] = set()
 
-    def process_frame(self, frame: np.ndarray) -> List[CachedPipelineResult]:
+    def process_frame(
+        self,
+        frame: np.ndarray,
+        *,
+        frame_idx: int | None = None,
+        fps: float | None = None,
+    ) -> List[CachedPipelineResult]:
         """Xử lý một frame với OCR caching.
 
         YOLO detection luôn chạy. OCR chỉ gọi khi cache miss
@@ -132,10 +160,12 @@ class CachedPipeline:
             Danh sách kết quả cho từng detection trong frame.
         """
         self._frame_idx += 1
+        speed_frame_idx = self._frame_idx if frame_idx is None else int(frame_idx)
         detections = self._detector.detect(frame)
+        speed_estimates = self._estimate_speeds(detections, speed_frame_idx, fps)
         results: List[CachedPipelineResult] = []
 
-        for det in detections:
+        for det, speed in zip(detections, speed_estimates):
             plate_text, from_cache = self._resolve_plate_text(det, frame)
 
             is_violation = self._violation_detector.check_mock_violation(
@@ -149,6 +179,9 @@ class CachedPipeline:
                     detection=det,
                     is_violation=is_violation,
                     from_cache=from_cache,
+                    track_id=speed.track_id,
+                    speed_kmh=speed.speed_kmh,
+                    is_speeding=speed.is_speeding,
                 )
             )
 
@@ -156,6 +189,23 @@ class CachedPipeline:
         self._cache.cleanup(self._frame_idx)
 
         return results
+
+    def _estimate_speeds(
+        self,
+        detections: Sequence[Detection],
+        frame_idx: int,
+        fps: float | None,
+    ) -> list[SpeedEstimate]:
+        if self._speed_estimator is None:
+            return [
+                SpeedEstimate(track_id=None, speed_kmh=None, is_speeding=False)
+                for _ in detections
+            ]
+        return self._speed_estimator.estimate(
+            detections,
+            frame_idx=frame_idx,
+            fps=fps,
+        )
 
     def _resolve_plate_text(
         self,
@@ -323,6 +373,8 @@ class CachedPipeline:
         """Reset pipeline state (cache + frame counter)."""
         self._cache.clear()
         self._frame_idx = 0
+        if self._speed_estimator is not None and hasattr(self._speed_estimator, "reset"):
+            self._speed_estimator.reset()
         if self._async_ocr:
             with self._lock:
                 self._pending_jobs.clear()
