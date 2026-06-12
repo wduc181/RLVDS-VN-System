@@ -103,6 +103,21 @@ class TrackingConfig(BaseModel):
     iou_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
 
 
+class SpeedConfig(BaseModel):
+    """Cấu hình ước lượng tốc độ biển số cho cảnh báo UI."""
+
+    enabled: bool = True
+    meters_per_pixel: float = Field(
+        default=0.05,
+        gt=0.0,
+        description="Tỷ lệ calibration thủ công từ pixel sang mét cho cảnh quay",
+    )
+    limit_kmh: float = Field(default=50.0, gt=0.0)
+    min_track_frames: int = Field(default=5, ge=2)
+    smoothing_window: int = Field(default=5, ge=1)
+    anchor: Literal["bottom_center", "center"] = "bottom_center"
+
+
 class SpatialConfig(BaseModel):
     """Cấu hình vùng vi phạm (polygon zones)."""
 
@@ -319,6 +334,7 @@ class Settings(BaseSettings):
     video: VideoConfig = Field(default_factory=VideoConfig)
     detection: DetectionConfig = Field(default_factory=DetectionConfig)
     tracking: TrackingConfig = Field(default_factory=TrackingConfig)
+    speed: SpeedConfig = Field(default_factory=SpeedConfig)
     spatial: SpatialConfig = Field(default_factory=SpatialConfig)
     temporal: TemporalConfig = Field(default_factory=TemporalConfig)
     ocr: OCRConfig = Field(default_factory=OCRConfig)

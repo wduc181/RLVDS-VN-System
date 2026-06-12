@@ -22,6 +22,7 @@ from rlvds.persistence.repository import ViolationRepository
 from rlvds.spatial.zones import ViolationZone
 from rlvds.temporal.traffic_light import TrafficLightFSM
 from rlvds.temporal.violation import ViolationDetector
+from rlvds.tracking import LicensePlateSpeedEstimator
 from rlvds.utils.logger import get_logger
 from rlvds.utils.visualization import (
     draw_detections,
@@ -101,9 +102,11 @@ class Pipeline:
         frame_idx = 0
         detection_results: List = []
         inference_interval = max(1, self._get_inference_interval_frames())
+        source_fps = self._get_video_source_fps()
 
         try:
             target_fps = self._cfg.video.fps
+            speed_fps = float(target_fps) if target_fps > 0 else source_fps
             frame_iter = (
                 self.video_source.iter_frames_throttled(float(target_fps))
                 if target_fps > 0
@@ -124,7 +127,11 @@ class Pipeline:
 
                 should_run_detection = (frame_idx - 1) % inference_interval == 0
                 if should_run_detection:
-                    detection_results = self._process_detections(raw_frame)
+                    detection_results = self._process_detections(
+                        raw_frame,
+                        frame_idx=frame_idx,
+                        fps=speed_fps,
+                    )
                     saved = self._persist_violations(
                         raw_frame,
                         detection_results,
@@ -189,6 +196,9 @@ class Pipeline:
 
         # Build cached or mini pipeline
         preprocessor = PlatePreprocessor(self._cfg.preprocessing)
+        source_fps = self._get_video_source_fps()
+        speed_fps = float(self._cfg.video.fps) if self._cfg.video.fps > 0 else source_fps
+        speed_estimator = self._build_speed_estimator(speed_fps)
         if self._cfg.ocr_cache.enabled:
             cache = PlateTrackCache(
                 iou_threshold=self._cfg.ocr_cache.iou_threshold,
@@ -202,6 +212,7 @@ class Pipeline:
                 cache=cache,
                 crop_expand_ratio=self._cfg.preprocessing.expand_ratio,
                 ocr_quality_frames=self._cfg.ocr_cache.ocr_quality_frames,
+                speed_estimator=speed_estimator,
             )
         else:
             self._pipeline = MiniPipeline(
@@ -209,19 +220,49 @@ class Pipeline:
                 ocr=self.ocr,
                 violation_detector=self.violation_detector,
                 crop_expand_ratio=self._cfg.preprocessing.expand_ratio,
+                speed_estimator=speed_estimator,
             )
 
         self._preprocessor = preprocessor
         logger.info("Pipeline started — source=%s", source)
 
-    def _process_detections(self, frame: np.ndarray) -> List:
+    def _process_detections(
+        self,
+        frame: np.ndarray,
+        *,
+        frame_idx: int | None = None,
+        fps: float | None = None,
+    ) -> List:
         if not self.detector.is_available():
             return []
         try:
+            return self._pipeline.process_frame(frame, frame_idx=frame_idx, fps=fps)
+        except TypeError as exc:
+            if "unexpected keyword argument" not in str(exc):
+                raise
             return self._pipeline.process_frame(frame)
         except Exception as exc:  # noqa: BLE001
             logger.error("Detection failed: %s", exc)
             return []
+
+    def _get_video_source_fps(self) -> float:
+        if self.video_source is None or not hasattr(self.video_source, "get_fps"):
+            return 0.0
+        return float(self.video_source.get_fps())
+
+    def _build_speed_estimator(self, fps: float) -> LicensePlateSpeedEstimator | None:
+        if not self._cfg.speed.enabled:
+            return None
+        return LicensePlateSpeedEstimator(
+            fps=fps,
+            meters_per_pixel=self._cfg.speed.meters_per_pixel,
+            speed_limit_kmh=self._cfg.speed.limit_kmh,
+            min_track_frames=self._cfg.speed.min_track_frames,
+            smoothing_window=self._cfg.speed.smoothing_window,
+            iou_threshold=self._cfg.tracking.iou_threshold,
+            max_age=self._cfg.tracking.max_age,
+            anchor=self._cfg.speed.anchor,
+        )
 
     def _get_inference_interval_frames(self) -> int:
         detection_cfg = getattr(self._cfg, "detection", None)

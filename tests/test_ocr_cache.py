@@ -13,6 +13,7 @@ from rlvds.spatial.zones import ViolationZone
 from rlvds.temporal.traffic_light import TrafficLightFSM
 from rlvds.temporal.violation import ViolationDetector
 from rlvds.tracking.bbox_matcher import compute_iou
+from rlvds.tracking.speed_estimator import LicensePlateSpeedEstimator
 
 
 # =========================================================================
@@ -243,6 +244,7 @@ def _make_pipeline(
     iou_threshold=0.3,
     ttl_frames=100,
     ocr_quality_frames=1,
+    speed_estimator=None,
 ):
     """Helper to create a CachedPipeline with test components."""
     zone = ViolationZone(vertices=[[0, 0], [1000, 0], [1000, 1000], [0, 1000]])
@@ -262,6 +264,7 @@ def _make_pipeline(
         violation_detector=violation_detector,
         cache=cache,
         ocr_quality_frames=ocr_quality_frames,
+        speed_estimator=speed_estimator,
     )
 
 
@@ -279,6 +282,25 @@ class TestCachedPipeline:
         assert results[0].plate_text == "30A-12345"
         assert results[0].from_cache is False
         assert ocr.call_count == 1
+
+    def test_cached_pipeline_attaches_speed_metadata(self) -> None:
+        speed_estimator = LicensePlateSpeedEstimator(
+            fps=10.0,
+            meters_per_pixel=0.1,
+            speed_limit_kmh=50.0,
+            min_track_frames=2,
+        )
+        pipeline = _make_pipeline(speed_estimator=speed_estimator)
+        frame = np.ones((300, 300, 3), dtype=np.uint8) * 128
+
+        first = pipeline.process_frame(frame, frame_idx=1, fps=10.0)
+        second = pipeline.process_frame(frame, frame_idx=2, fps=10.0)
+
+        assert first[0].track_id == 0
+        assert first[0].speed_kmh is None
+        assert second[0].track_id == 0
+        assert second[0].speed_kmh == pytest.approx(0.0)
+        assert second[0].is_speeding is False
 
     def test_small_low_resolution_crop_still_reaches_ocr(self) -> None:
         """Small distant plate crops should be upscaled by OCR, not skipped early."""

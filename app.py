@@ -41,6 +41,7 @@ from rlvds.ocr.recognizer import LicensePlateOCR
 from rlvds.persistence import Database, ViolationRepository
 from rlvds.spatial import ViolationZone
 from rlvds.temporal import TrafficLightFSM, ViolationDetector
+from rlvds.tracking import LicensePlateSpeedEstimator
 from rlvds.utils.logger import get_logger
 from rlvds.utils.visualization import (
     draw_detections,
@@ -387,6 +388,21 @@ def _build_runtime_components() -> tuple[ViolationZone, TrafficLightFSM, Violati
     return zone, traffic_light, violation_detector, frame_buffer
 
 
+def _build_speed_estimator(settings: Any, fps: float) -> LicensePlateSpeedEstimator | None:
+    if not settings.speed.enabled:
+        return None
+    return LicensePlateSpeedEstimator(
+        fps=fps,
+        meters_per_pixel=settings.speed.meters_per_pixel,
+        speed_limit_kmh=settings.speed.limit_kmh,
+        min_track_frames=settings.speed.min_track_frames,
+        smoothing_window=settings.speed.smoothing_window,
+        iou_threshold=settings.tracking.iou_threshold,
+        max_age=settings.tracking.max_age,
+        anchor=settings.speed.anchor,
+    )
+
+
 def _render_image_ocr_tab(settings: Any) -> None:
     uploaded_file = st.file_uploader(
         "Upload traffic image",
@@ -513,6 +529,13 @@ def main() -> None:
             f"{settings.temporal.red_duration_sec}/"
             f"{settings.temporal.green_duration_sec}/"
             f"{settings.temporal.yellow_duration_sec} (s)"
+        )
+
+        st.subheader("Speed Warning")
+        st.caption(
+            f"{'Enabled' if settings.speed.enabled else 'Disabled'} | "
+            f"limit {settings.speed.limit_kmh:.1f} km/h | "
+            f"{settings.speed.meters_per_pixel:.4f} m/px"
         )
 
         is_running = st.session_state.get("running", False)
@@ -655,6 +678,7 @@ def main() -> None:
                 use_angle_cls=settings.ocr.use_angle_cls,
                 enhanced_fallback=settings.ocr.enhanced_fallback,
             )
+            speed_estimator = _build_speed_estimator(settings, fps=float(target_fps))
 
             # Chọn pipeline: CachedPipeline (tối ưu FPS) hoặc MiniPipeline (gốc)
             if settings.ocr_cache.enabled:
@@ -671,6 +695,7 @@ def main() -> None:
                     crop_expand_ratio=settings.preprocessing.expand_ratio,
                     ocr_quality_frames=settings.ocr_cache.ocr_quality_frames,
                     async_ocr=settings.ocr_cache.async_ocr,
+                    speed_estimator=speed_estimator,
                 )
                 st.session_state["cached_pipeline"] = pipeline
                 logger.info("CachedPipeline initialized (iou_thresh=%.2f, ttl=%d, async_ocr=%s)",
@@ -683,6 +708,7 @@ def main() -> None:
                     ocr=ocr_engine,
                     violation_detector=violation_detector,
                     crop_expand_ratio=settings.preprocessing.expand_ratio,
+                    speed_estimator=speed_estimator,
                 )
                 st.session_state["mini_pipeline"] = pipeline
                 logger.info("MiniPipeline initialized (cache disabled)")
@@ -771,7 +797,11 @@ def main() -> None:
             )
             if pipeline and st.session_state.get("detection_available", False):
                 try:
-                    detection_results = pipeline.process_frame(raw_frame)
+                    detection_results = pipeline.process_frame(
+                        raw_frame,
+                        frame_idx=frame_idx,
+                        fps=float(target_fps),
+                    )
                     draw_detections(frame, detection_results)
                 except Exception as exc:  # noqa: BLE001
                     logger.error("Detection failed on frame %d: %s", frame_idx, exc)

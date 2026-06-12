@@ -9,6 +9,7 @@ RLVDS-VN là hệ thống phát hiện xe vượt đèn đỏ tại Việt Nam. 
 - Phát hiện biển số bằng YOLOv5 custom weights.
 - OCR biển số bằng PaddleOCR, có thể chạy qua OCR microservice CPU để tránh xung đột CUDA/cuDNN.
 - Logic vi phạm dựa trên trạng thái đèn đỏ và anchor point của bbox nằm trong polygon giám sát.
+- Cảnh báo tốc độ ước lượng trên UI dựa trên chuyển động bbox biển số qua nhiều frame.
 - Giao diện Streamlit cho video stream và upload ảnh OCR riêng lẻ.
 - Lưu record vi phạm, ảnh scene và ảnh biển số vào SQLite + thư mục evidence.
 - Cấu hình bằng YAML, `config/local.yaml` và env vars prefix `RLVDS_`.
@@ -29,7 +30,7 @@ RLVDS-VN là hệ thống phát hiện xe vượt đèn đỏ tại Việt Nam. 
 | CLI | `main.py` | Chạy pipeline từ terminal |
 | Database | SQLite | Lưu record vi phạm và đường dẫn evidence |
 | Config | Pydantic Settings + YAML + env vars | Cấu hình type-safe, override bằng `RLVDS_` |
-| Tracking | SORT-style tracker | Module optional, chưa là điều kiện chính của violation flow |
+| Tracking | IOU matching + SORT-style tracker | Theo dõi bbox biển số cho cache/speed warning; chưa là điều kiện chính của red-light violation |
 | Test | pytest | Unit tests cho detection, OCR, cache, polygon, persistence |
 | Container | Docker Compose | Chạy demo Streamlit tại `localhost:8501` |
 
@@ -116,6 +117,17 @@ RLVDS_DETECTION__DEVICE=cpu
 RLVDS_DETECTION__CONFIDENCE_THRESHOLD=0.6
 RLVDS_DATABASE__URL=sqlite:///data/rlvds.db
 ```
+
+Speed warning v1 chỉ hiển thị cảnh báo trên UI, không lưu record SQLite và không thay đổi logic vi phạm đèn đỏ. Tốc độ km/h phụ thuộc calibration thủ công theo cảnh quay:
+
+```yaml
+speed:
+  enabled: true
+  limit_kmh: 50.0
+  meters_per_pixel: 0.05
+```
+
+Với camera thật, chỉnh `meters_per_pixel` trong `config/local.yaml` theo khoảng cách thực trên vùng đường đang giám sát. Nếu chưa calibration, chỉ dùng cảnh báo này như tín hiệu tham khảo cho demo.
 
 ## Test
 
