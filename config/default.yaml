@@ -33,6 +33,15 @@ tracking:
   min_hits: 3           # Số frame tối thiểu để xác nhận track
   iou_threshold: 0.3    # Ngưỡng IoU cho matching
 
+# --- Speed Warning ---
+speed:
+  enabled: true              # Bật cảnh báo tốc độ ước lượng trên UI
+  meters_per_pixel: 0.05     # Calibration thủ công: 1 pixel tương ứng bao nhiêu mét
+  limit_kmh: 50.0            # Ngưỡng cảnh báo tốc độ
+  min_track_frames: 5        # Số frame tối thiểu trước khi tin tốc độ
+  smoothing_window: 5        # Số mẫu dùng để làm mượt tốc độ
+  anchor: "bottom_center"    # "bottom_center" | "center"
+
 # --- Spatial (Vùng vi phạm) ---
 spatial:
   violation_zone: [[600, 450], [1200, 450], [1260, 700], [600, 700]]   # Polygon vertices: [[x1,y1], [x2,y2], ...]

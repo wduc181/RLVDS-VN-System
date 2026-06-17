@@ -210,10 +210,13 @@ def draw_detections(
     results: list,
     bbox_color: Tuple[int, int, int] = COLOR_BLUE,
     violation_color: Tuple[int, int, int] = COLOR_RED,
+    speeding_color: Tuple[int, int, int] = COLOR_YELLOW,
     text_color: Tuple[int, int, int] = COLOR_GREEN,
     bbox_thickness: int = 2,
     font_scale: float = 0.7,
     font_thickness: int = 2,
+    show_plate_text: bool = True,
+    show_speed: bool = True,
 ) -> np.ndarray:
     """Vẽ detection results lên frame (bbox + plate text + violation alert).
 
@@ -223,6 +226,7 @@ def draw_detections(
             Mỗi result cần có: detection (với bbox, confidence), plate_text, is_violation.
         bbox_color: Màu bbox mặc định (BGR).
         violation_color: Màu bbox khi phát hiện vi phạm (BGR).
+        speeding_color: Màu bbox khi cảnh báo quá tốc độ (BGR).
         text_color: Màu text biển số (BGR).
         bbox_thickness: Độ dày viền bbox.
         font_scale: Hệ số co giãn font cho plate text.
@@ -232,24 +236,32 @@ def draw_detections(
         Frame đã vẽ annotations.
     """
     has_violation = False
+    has_speeding = False
 
     for result in results:
         detection = result.detection
         plate_text = result.plate_text
         is_violation = result.is_violation
+        speed_kmh = getattr(result, "speed_kmh", None)
+        is_speeding = bool(getattr(result, "is_speeding", False))
 
         x1, y1, x2, y2 = detection.bbox
         confidence = detection.confidence
 
-        # Choose color based on violation status
-        color = violation_color if is_violation else bbox_color
+        # Red-light violation has the highest visual priority.
+        if is_violation:
+            color = violation_color
+        elif is_speeding:
+            color = speeding_color
+        else:
+            color = bbox_color
 
         # Draw bounding box with confidence label
         label = f"{int(confidence * 100)}%"
         draw_bbox(frame, (x1, y1, x2, y2), color=color, thickness=bbox_thickness, label=label)
 
         # Draw plate text above bbox if recognized
-        if plate_text and plate_text.lower() != "unknown":
+        if show_plate_text and plate_text and plate_text.lower() != "unknown":
             text_y = max(y1 - 35, 20)
             draw_text(
                 frame,
@@ -260,11 +272,30 @@ def draw_detections(
                 text_color=text_color,
             )
 
+        if show_speed and speed_kmh is not None:
+            speed_text = f"{float(speed_kmh):.1f} km/h"
+            if is_speeding:
+                speed_text = f"{speed_text} > LIMIT"
+                has_speeding = True
+            speed_y = y2 + 25
+            if speed_y >= frame.shape[0]:
+                speed_y = max(y1 - 60, 20)
+            draw_text(
+                frame,
+                speed_text,
+                pos=(x1, speed_y),
+                font_scale=font_scale,
+                font_thickness=font_thickness,
+                text_color=color,
+            )
+
         if is_violation:
             has_violation = True
 
     # Draw violation alert banner once if any violation detected
     if has_violation:
         draw_violation_alert(frame, text="VIOLATION DETECTED")
+    elif has_speeding:
+        draw_violation_alert(frame, text="SPEED WARNING", color=speeding_color)
 
     return frame

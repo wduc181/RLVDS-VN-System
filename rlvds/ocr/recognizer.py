@@ -17,6 +17,40 @@ from rlvds.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+OCR_SERVICE_URL = "http://127.0.0.1:8502"
+
+
+def is_ocr_service_available(
+    url: str = OCR_SERVICE_URL,
+    timeout: float = 0.5,
+) -> bool:
+    """Return True only when the service on ``url`` speaks the OCR JSON API."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    import cv2
+
+    probe_image = np.ones((8, 16, 3), dtype=np.uint8) * 255
+    success, encoded_img = cv2.imencode(".png", probe_image)
+    if not success:
+        return False
+
+    request = urllib.request.Request(
+        url,
+        data=encoded_img.tobytes(),
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
+        return False
+    except Exception:  # noqa: BLE001
+        return False
+
+    return isinstance(payload, dict) and "raw_result" in payload
+
 
 @dataclass
 class OCRResult:
@@ -114,7 +148,7 @@ class LicensePlateOCR(BaseOCR):
                 req_data = encoded_img.tobytes()
                 try:
                     req = urllib.request.Request(
-                        "http://127.0.0.1:8502",
+                        OCR_SERVICE_URL,
                         data=req_data,
                         headers={"Content-Type": "application/octet-stream"},
                     )
@@ -191,26 +225,12 @@ class LicensePlateOCR(BaseOCR):
 
     def _build_engine(self) -> Any | None:
         # Kiểm tra xem OCR Microservice đã chạy chưa, nếu có thì không cần load model cục bộ
-        import urllib.request
-        import urllib.error
-        try:
-            with urllib.request.urlopen("http://127.0.0.1:8502", timeout=0.5) as _:
-                pass
+        if is_ocr_service_available(OCR_SERVICE_URL, timeout=0.5):
             logger.info(
                 "Detected active OCR Microservice. "
                 "Bypassing local engine initialization."
             )
             return None
-        except urllib.error.HTTPError:
-            # HTTPError phản hồi từ server -> Server online
-            logger.info(
-                "Detected active OCR Microservice. "
-                "Bypassing local engine initialization."
-            )
-            return None
-        except Exception:
-            # Server offline -> Build local engine
-            pass
 
         os.environ.setdefault("FLAGS_use_mkldnn", "0")
 
@@ -488,10 +508,25 @@ def _candidate_text_variants(
     raw_texts: Sequence[str],
     cleaned_texts: Sequence[str],
 ) -> list[str]:
-    candidates = {
-        "".join(raw_texts),
-        "".join(cleaned_texts),
-        "-".join(raw_texts),
-        "-".join(cleaned_texts),
-    }
-    return [candidate for candidate in candidates if candidate]
+    has_explicit_separator = any("-" in raw_text for raw_text in raw_texts)
+    if has_explicit_separator:
+        candidates = [
+            "-".join(raw_texts),
+            "-".join(cleaned_texts),
+            "".join(raw_texts),
+            "".join(cleaned_texts),
+        ]
+    else:
+        candidates = [
+            "".join(raw_texts),
+            "".join(cleaned_texts),
+            "-".join(raw_texts),
+            "-".join(cleaned_texts),
+        ]
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate and candidate not in seen:
+            ordered.append(candidate)
+            seen.add(candidate)
+    return ordered

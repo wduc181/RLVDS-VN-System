@@ -37,10 +37,11 @@ from rlvds.core.mini_pipeline import MiniPipeline
 from rlvds.detection import LicensePlateDetector
 from rlvds.ingestion import FrameBuffer, VideoSource
 from rlvds.ocr.preprocessor import PlatePreprocessor
-from rlvds.ocr.recognizer import LicensePlateOCR
+from rlvds.ocr.recognizer import LicensePlateOCR, is_ocr_service_available
 from rlvds.persistence import Database, ViolationRepository
 from rlvds.spatial import ViolationZone
 from rlvds.temporal import TrafficLightFSM, ViolationDetector
+from rlvds.tracking import LicensePlateSpeedEstimator
 from rlvds.utils.logger import get_logger
 from rlvds.utils.visualization import (
     draw_detections,
@@ -49,11 +50,8 @@ from rlvds.utils.visualization import (
     draw_zone_overlay,
     set_hd_resolution,
 )
-from rlvds.core.mini_pipeline import MiniPipeline
 from rlvds.core.cached_pipeline import CachedPipeline
 from rlvds.ocr.plate_cache import PlateTrackCache
-from rlvds.detection import LicensePlateDetector
-from rlvds.ocr.recognizer import LicensePlateOCR
 
 logger = get_logger(__name__)
 
@@ -64,6 +62,22 @@ class ImageOCRResult:
     plate_text: str
     ocr_confidence: float
     crop: np.ndarray
+
+
+@dataclass
+class _DisabledOCRResult:
+    text: str = "unknown"
+    confidence: float = 0.0
+
+
+class _DisabledOCR:
+    """No-op OCR used when the Streamlit run only needs detection/speed."""
+
+    def recognize(self, _image: np.ndarray) -> str:
+        return "unknown"
+
+    def recognize_with_confidence(self, _image: np.ndarray) -> _DisabledOCRResult:
+        return _DisabledOCRResult()
 
 
 def _crop_plate_for_ocr(
@@ -348,6 +362,8 @@ def _cleanup_video_source() -> None:
         "violation_repo",
         "plate_preprocessor",
         "recorded_plates_cache",
+        "read_plate_text",
+        "measure_speed",
     ):
         st.session_state.pop(key, None)
     st.session_state.pop("frame_idx", None)
@@ -385,6 +401,21 @@ def _build_runtime_components() -> tuple[ViolationZone, TrafficLightFSM, Violati
     )
     frame_buffer = FrameBuffer(max_size=settings.video.buffer_size)
     return zone, traffic_light, violation_detector, frame_buffer
+
+
+def _build_speed_estimator(settings: Any, fps: float) -> LicensePlateSpeedEstimator | None:
+    if not settings.speed.enabled:
+        return None
+    return LicensePlateSpeedEstimator(
+        fps=fps,
+        meters_per_pixel=settings.speed.meters_per_pixel,
+        speed_limit_kmh=settings.speed.limit_kmh,
+        min_track_frames=settings.speed.min_track_frames,
+        smoothing_window=settings.speed.smoothing_window,
+        iou_threshold=settings.tracking.iou_threshold,
+        max_age=settings.tracking.max_age,
+        anchor=settings.speed.anchor,
+    )
 
 
 def _render_image_ocr_tab(settings: Any) -> None:
@@ -483,16 +514,22 @@ def main() -> None:
         display_width = st.slider("Display width (px)", 480, 1920, 1280, step=80)
         show_fps = st.checkbox("Show FPS", value=True)
         show_zone_overlay = st.checkbox("Show zone overlay", value=True)
-        show_detection = st.checkbox(
-            "Enable plate detection",
+        read_plate_text = st.checkbox(
+            "Đọc biển số (OCR)",
             value=False,
-            help="Enable detection + OCR overlay",
+            help="Bật YOLO + OCR để nhận diện ký tự biển số.",
         )
+        measure_speed = st.checkbox(
+            "Đo tốc độ",
+            value=False,
+            disabled=not settings.speed.enabled,
+            help="Bật YOLO + tracking để ước lượng tốc độ theo cấu hình speed.",
+        )
+        run_plate_analysis = read_plate_text or measure_speed
 
         if (
-            show_detection
+            run_plate_analysis
             and st.session_state.get("running", False)
-            and "mini_pipeline" in st.session_state
             and not st.session_state.get("detection_available", False)
         ):
             st.warning("Detection model is not available. Check detection.model_path.")
@@ -513,6 +550,13 @@ def main() -> None:
             f"{settings.temporal.red_duration_sec}/"
             f"{settings.temporal.green_duration_sec}/"
             f"{settings.temporal.yellow_duration_sec} (s)"
+        )
+
+        st.subheader("Speed Warning")
+        st.caption(
+            f"{'Enabled' if settings.speed.enabled else 'Disabled'} | "
+            f"limit {settings.speed.limit_kmh:.1f} km/h | "
+            f"{settings.speed.meters_per_pixel:.4f} m/px"
         )
 
         is_running = st.session_state.get("running", False)
@@ -546,56 +590,49 @@ def main() -> None:
 
     if st.session_state.pop("should_start", False) and source_path:
         _cleanup_video_source()
+        st.session_state["read_plate_text"] = bool(read_plate_text)
+        st.session_state["measure_speed"] = bool(measure_speed and settings.speed.enabled)
+        run_plate_analysis = bool(read_plate_text or measure_speed)
 
-        # Khởi chạy OCR Microservice độc lập ẩn GPU
+        # Khởi chạy OCR Microservice độc lập ẩn GPU khi thật sự cần OCR.
         import subprocess
         import sys
-        import urllib.request
-        import urllib.error
 
         server_online = False
-        try:
-            with urllib.request.urlopen("http://127.0.0.1:8502", timeout=0.2) as _:
-                server_online = True
-        except urllib.error.HTTPError:
-            server_online = True
-        except Exception:
-            server_online = False
+        if read_plate_text:
+            server_online = is_ocr_service_available(timeout=0.5)
 
-        if not server_online:
-            logger.info("Starting background OCR Microservice process...")
-            env = {**os.environ, "CUDA_VISIBLE_DEVICES": ""}
-            proc = subprocess.Popen(
-                [sys.executable, "rlvds/ocr/ocr_server.py"],
-                env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            st.session_state["ocr_server_proc"] = proc
+            if not server_online:
+                logger.info("Starting background OCR Microservice process...")
+                env = {**os.environ, "CUDA_VISIBLE_DEVICES": ""}
+                proc = subprocess.Popen(
+                    [sys.executable, "rlvds/ocr/ocr_server.py"],
+                    env=env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                st.session_state["ocr_server_proc"] = proc
 
-            # Polling check (tối đa 10 giây) để đợi OCR Server khởi động hoàn tất
-            status_text = video_tab.empty()
-            status_text.info("Đang khởi động OCR Microservice chạy ngầm trên CPU...")
-            for _ in range(20):
-                time.sleep(0.5)
-                try:
-                    with urllib.request.urlopen("http://127.0.0.1:8502", timeout=0.2) as _:
+                # Polling check (tối đa 10 giây) để đợi OCR Server khởi động hoàn tất
+                status_text = video_tab.empty()
+                status_text.info("Đang khởi động OCR Microservice chạy ngầm trên CPU...")
+                for _ in range(20):
+                    time.sleep(0.5)
+                    if is_ocr_service_available(timeout=0.5):
                         server_online = True
                         break
-                except urllib.error.HTTPError:
-                    server_online = True
-                    break
-                except Exception:
-                    pass
 
-            if server_online:
-                status_text.success("OCR Microservice đã sẵn sàng!")
-                time.sleep(0.5)
-                status_text.empty()
-            else:
-                status_text.warning("Không kết nối được với OCR Microservice. Sẽ tự động dùng CPU cục bộ.")
-                time.sleep(1.0)
-                status_text.empty()
+                if server_online:
+                    status_text.success("OCR Microservice đã sẵn sàng!")
+                    time.sleep(0.5)
+                    status_text.empty()
+                else:
+                    status_text.warning(
+                        "Không kết nối được với OCR Microservice. "
+                        "Sẽ tự động dùng CPU cục bộ."
+                    )
+                    time.sleep(1.0)
+                    status_text.empty()
 
         try:
             src = VideoSource(source_path)
@@ -636,65 +673,96 @@ def main() -> None:
             st.session_state["violation_repo"] = None
             st.session_state["plate_preprocessor"] = None
 
-        try:
-            detector = LicensePlateDetector(
-                model_path=settings.detection.model_path,
-                confidence_threshold=settings.detection.confidence_threshold,
-                iou_threshold=settings.detection.iou_threshold,
-                image_size=settings.detection.image_size,
-                device=settings.detection.device,
-            )
-            ocr_engine = LicensePlateOCR(
-                lang=settings.ocr.lang,
-                use_gpu=settings.ocr.use_gpu,
-                confidence_threshold=settings.ocr.confidence_threshold,
-                det_model_dir=settings.ocr.det_model_dir,
-                rec_model_dir=settings.ocr.rec_model_dir,
-                enable_mkldnn=settings.ocr.enable_mkldnn,
-                cpu_threads=settings.ocr.cpu_threads,
-                use_angle_cls=settings.ocr.use_angle_cls,
-                enhanced_fallback=settings.ocr.enhanced_fallback,
-            )
+        if run_plate_analysis:
+            try:
+                detector = LicensePlateDetector(
+                    model_path=settings.detection.model_path,
+                    confidence_threshold=settings.detection.confidence_threshold,
+                    iou_threshold=settings.detection.iou_threshold,
+                    image_size=settings.detection.image_size,
+                    device=settings.detection.device,
+                )
+                if read_plate_text:
+                    ocr_engine = LicensePlateOCR(
+                        lang=settings.ocr.lang,
+                        use_gpu=settings.ocr.use_gpu,
+                        confidence_threshold=settings.ocr.confidence_threshold,
+                        det_model_dir=settings.ocr.det_model_dir,
+                        rec_model_dir=settings.ocr.rec_model_dir,
+                        enable_mkldnn=settings.ocr.enable_mkldnn,
+                        cpu_threads=settings.ocr.cpu_threads,
+                        use_angle_cls=settings.ocr.use_angle_cls,
+                        enhanced_fallback=True,
+                    )
+                else:
+                    ocr_engine = _DisabledOCR()
+                speed_estimator = (
+                    _build_speed_estimator(settings, fps=float(target_fps))
+                    if measure_speed
+                    else None
+                )
 
-            # Chọn pipeline: CachedPipeline (tối ưu FPS) hoặc MiniPipeline (gốc)
-            if settings.ocr_cache.enabled:
-                plate_cache = PlateTrackCache(
-                    iou_threshold=settings.ocr_cache.iou_threshold,
-                    max_size=settings.ocr_cache.max_cache_size,
-                    ttl_frames=settings.ocr_cache.cache_ttl_frames,
-                )
-                pipeline = CachedPipeline(
-                    detector=detector,
-                    ocr=ocr_engine,
-                    violation_detector=violation_detector,
-                    cache=plate_cache,
-                    crop_expand_ratio=settings.preprocessing.expand_ratio,
-                    ocr_quality_frames=settings.ocr_cache.ocr_quality_frames,
-                    async_ocr=settings.ocr_cache.async_ocr,
-                )
-                st.session_state["cached_pipeline"] = pipeline
-                logger.info("CachedPipeline initialized (iou_thresh=%.2f, ttl=%d, async_ocr=%s)",
-                            settings.ocr_cache.iou_threshold,
-                            settings.ocr_cache.cache_ttl_frames,
-                            settings.ocr_cache.async_ocr)
-            else:
-                pipeline = MiniPipeline(
-                    detector=detector,
-                    ocr=ocr_engine,
-                    violation_detector=violation_detector,
-                    crop_expand_ratio=settings.preprocessing.expand_ratio,
-                )
-                st.session_state["mini_pipeline"] = pipeline
-                logger.info("MiniPipeline initialized (cache disabled)")
+                # Chon pipeline: CachedPipeline toi uu FPS hoac MiniPipeline goc.
+                if settings.ocr_cache.enabled:
+                    plate_cache = PlateTrackCache(
+                        iou_threshold=settings.ocr_cache.iou_threshold,
+                        max_size=settings.ocr_cache.max_cache_size,
+                        ttl_frames=settings.ocr_cache.cache_ttl_frames,
+                    )
+                    pipeline = CachedPipeline(
+                        detector=detector,
+                        ocr=ocr_engine,
+                        violation_detector=violation_detector,
+                        cache=plate_cache,
+                        crop_expand_ratio=settings.preprocessing.expand_ratio,
+                        ocr_quality_frames=settings.ocr_cache.ocr_quality_frames,
+                        async_ocr=(
+                            settings.ocr_cache.async_ocr
+                            and read_plate_text
+                            and measure_speed
+                        ),
+                        speed_estimator=speed_estimator,
+                    )
+                    st.session_state["cached_pipeline"] = pipeline
+                    logger.info(
+                        "CachedPipeline initialized (iou_thresh=%.2f, ttl=%d, "
+                        "async_ocr=%s, read_plates=%s, speed=%s)",
+                        settings.ocr_cache.iou_threshold,
+                        settings.ocr_cache.cache_ttl_frames,
+                        settings.ocr_cache.async_ocr
+                        and read_plate_text
+                        and measure_speed,
+                        read_plate_text,
+                        measure_speed,
+                    )
+                else:
+                    pipeline = MiniPipeline(
+                        detector=detector,
+                        ocr=ocr_engine,
+                        violation_detector=violation_detector,
+                        crop_expand_ratio=settings.preprocessing.expand_ratio,
+                        speed_estimator=speed_estimator,
+                    )
+                    st.session_state["mini_pipeline"] = pipeline
+                    logger.info(
+                        "MiniPipeline initialized (cache disabled, read_plates=%s, speed=%s)",
+                        read_plate_text,
+                        measure_speed,
+                    )
 
-            st.session_state["detection_available"] = detector.is_available()
-            st.session_state["plate_detector"] = detector
-            if detector.is_available():
-                logger.info("Detection pipeline initialized successfully")
-            else:
-                logger.warning("Detection model not available - detection disabled")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to initialize detection pipeline: %s", exc)
+                st.session_state["detection_available"] = detector.is_available()
+                st.session_state["plate_detector"] = detector
+                if detector.is_available():
+                    logger.info("Detection pipeline initialized successfully")
+                else:
+                    logger.warning("Detection model not available - detection disabled")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to initialize detection pipeline: %s", exc)
+                st.session_state["mini_pipeline"] = None
+                st.session_state["cached_pipeline"] = None
+                st.session_state["plate_detector"] = None
+                st.session_state["detection_available"] = False
+        else:
             st.session_state["mini_pipeline"] = None
             st.session_state["cached_pipeline"] = None
             st.session_state["plate_detector"] = None
@@ -724,6 +792,9 @@ def main() -> None:
 
     total_frames = st.session_state.get("total_frames", 0)
     resolution_display.metric("Resolution", st.session_state.get("resolution", "-"))
+    read_plate_text_active = bool(st.session_state.get("read_plate_text", False))
+    measure_speed_active = bool(st.session_state.get("measure_speed", False))
+    run_plate_analysis = read_plate_text_active or measure_speed_active
 
     frame_interval = 1.0 / target_fps
     prev_time = time.perf_counter()
@@ -763,7 +834,7 @@ def main() -> None:
             zone.draw(frame)
 
         detection_results = []
-        if show_detection:
+        if run_plate_analysis:
             # Ưu tiên CachedPipeline, fallback sang MiniPipeline
             pipeline = (
                 st.session_state.get("cached_pipeline")
@@ -771,8 +842,19 @@ def main() -> None:
             )
             if pipeline and st.session_state.get("detection_available", False):
                 try:
-                    detection_results = pipeline.process_frame(raw_frame)
-                    draw_detections(frame, detection_results)
+                    detection_results = pipeline.process_frame(
+                        raw_frame,
+                        frame_idx=frame_idx,
+                        fps=float(target_fps),
+                        run_ocr=read_plate_text_active,
+                        estimate_speed=measure_speed_active,
+                    )
+                    draw_detections(
+                        frame,
+                        detection_results,
+                        show_plate_text=read_plate_text_active,
+                        show_speed=measure_speed_active,
+                    )
                 except Exception as exc:  # noqa: BLE001
                     logger.error("Detection failed on frame %d: %s", frame_idx, exc)
 
@@ -782,7 +864,7 @@ def main() -> None:
         detector = st.session_state.get("plate_detector")
         recorded_cache = st.session_state.setdefault("recorded_plates_cache", set())
 
-        if repo is not None and detection_results:
+        if read_plate_text_active and repo is not None and detection_results:
             for result in detection_results:
                 if not result.is_violation:
                     continue

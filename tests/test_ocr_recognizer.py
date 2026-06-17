@@ -245,6 +245,70 @@ def test_license_plate_ocr_merges_two_line_motorbike_plate() -> None:
     assert result.confidence == pytest.approx((0.90 + 0.92) / 2.0)
 
 
+@pytest.mark.parametrize(
+    ("top_line", "bottom_line", "expected"),
+    [
+        ("14-P8", "2980", "14P8-2980"),
+        ("18-E2", "7988", "18E2-7988"),
+        ("20-L3", "4660", "20L3-4660"),
+        ("47A", "40194", "47A-40194"),
+        ("90-B3", "285.06", "90B3-28506"),
+        ("90-AB", "285.06", "90AB-28506"),
+    ],
+)
+def test_license_plate_ocr_prefers_two_line_motorbike_layout(
+    top_line: str,
+    bottom_line: str,
+    expected: str,
+) -> None:
+    fake_result = [
+        [
+            [[[0, 0], [1, 0], [1, 1], [0, 1]], (top_line, 0.90)],
+            [[[0, 2], [1, 2], [1, 3], [0, 3]], (bottom_line, 0.92)],
+        ]
+    ]
+    ocr = LicensePlateOCR(
+        ocr_engine=_FakePaddleEngine(result=fake_result),
+        confidence_threshold=0.8,
+        preprocessor=_FakePreprocessor(),
+    )
+    image = np.ones((30, 120, 3), dtype=np.uint8) * 255
+    result = ocr.recognize_with_confidence(image)
+    assert result.text == expected
+    assert result.confidence == pytest.approx((0.90 + 0.92) / 2.0)
+
+
+@pytest.mark.parametrize(
+    ("raw_text", "expected"),
+    [
+        ("14P82980", "14P8-2980"),
+        ("20L34660", "20L3-4660"),
+        ("21V-78713", "21V7-8713"),
+        ("21V78713", "21V7-8713"),
+        ("90B328506", "90B3-28506"),
+        ("90AB28506", "90AB-28506"),
+    ],
+)
+def test_license_plate_ocr_formats_flat_motorbike_candidates(
+    raw_text: str,
+    expected: str,
+) -> None:
+    fake_result = [
+        [
+            [[[0, 0], [1, 0], [1, 1], [0, 1]], (raw_text, 0.92)],
+        ]
+    ]
+    ocr = LicensePlateOCR(
+        ocr_engine=_FakePaddleEngine(result=fake_result),
+        confidence_threshold=0.8,
+        preprocessor=_FakePreprocessor(),
+    )
+    image = np.ones((30, 120, 3), dtype=np.uint8) * 255
+    result = ocr.recognize_with_confidence(image)
+    assert result.text == expected
+    assert result.confidence == pytest.approx(0.92)
+
+
 def test_license_plate_ocr_parses_flat_multi_entry_result() -> None:
     fake_result = [
         [[[0, 0], [1, 0], [1, 1], [0, 1]], ("15-B1", 0.90)],
