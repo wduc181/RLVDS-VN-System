@@ -283,6 +283,18 @@ class TestCachedPipeline:
         assert results[0].from_cache is False
         assert ocr.call_count == 1
 
+    def test_cached_pipeline_can_skip_ocr_independently(self) -> None:
+        ocr = _CountingOCR()
+        pipeline = _make_pipeline(ocr=ocr)
+        frame = np.ones((300, 300, 3), dtype=np.uint8) * 128
+
+        results = pipeline.process_frame(frame, run_ocr=False)
+
+        assert results[0].plate_text == "unknown"
+        assert results[0].from_cache is False
+        assert ocr.call_count == 0
+        assert pipeline.cache.size == 0
+
     def test_cached_pipeline_attaches_speed_metadata(self) -> None:
         speed_estimator = LicensePlateSpeedEstimator(
             fps=10.0,

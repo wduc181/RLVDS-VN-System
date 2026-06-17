@@ -215,6 +215,8 @@ def draw_detections(
     bbox_thickness: int = 2,
     font_scale: float = 0.7,
     font_thickness: int = 2,
+    show_plate_text: bool = True,
+    show_speed: bool = True,
 ) -> np.ndarray:
     """Vẽ detection results lên frame (bbox + plate text + violation alert).
 
@@ -259,7 +261,7 @@ def draw_detections(
         draw_bbox(frame, (x1, y1, x2, y2), color=color, thickness=bbox_thickness, label=label)
 
         # Draw plate text above bbox if recognized
-        if plate_text and plate_text.lower() != "unknown":
+        if show_plate_text and plate_text and plate_text.lower() != "unknown":
             text_y = max(y1 - 35, 20)
             draw_text(
                 frame,
@@ -270,7 +272,7 @@ def draw_detections(
                 text_color=text_color,
             )
 
-        if speed_kmh is not None:
+        if show_speed and speed_kmh is not None:
             speed_text = f"{float(speed_kmh):.1f} km/h"
             if is_speeding:
                 speed_text = f"{speed_text} > LIMIT"

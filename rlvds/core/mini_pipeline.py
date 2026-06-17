@@ -79,20 +79,29 @@ class MiniPipeline:
         *,
         frame_idx: int | None = None,
         fps: float | None = None,
+        run_ocr: bool = True,
+        estimate_speed: bool = True,
     ) -> List[MiniPipelineResult]:
         """Run detect -> crop -> OCR -> mock violation check for a frame."""
         current_frame_idx = self._resolve_frame_idx(frame_idx)
         detections = self._detector.detect(frame)
-        speed_estimates = self._estimate_speeds(detections, current_frame_idx, fps)
+        speed_estimates = self._estimate_speeds(
+            detections,
+            current_frame_idx,
+            fps,
+            enabled=estimate_speed,
+        )
         results: List[MiniPipelineResult] = []
 
         for det, speed in zip(detections, speed_estimates):
-            crop = self._detector.crop_plate(
-                det,
-                frame,
-                expand_ratio=self._crop_expand_ratio,
-            )
-            plate_text = self._ocr.recognize(crop)
+            plate_text = "unknown"
+            if run_ocr:
+                crop = self._detector.crop_plate(
+                    det,
+                    frame,
+                    expand_ratio=self._crop_expand_ratio,
+                )
+                plate_text = self._ocr.recognize(crop)
             is_violation = self._violation_detector.check_mock_violation(
                 plate_text=plate_text,
                 detection=det,
@@ -139,8 +148,10 @@ class MiniPipeline:
         detections: Sequence[Detection],
         frame_idx: int,
         fps: float | None,
+        *,
+        enabled: bool = True,
     ) -> list[SpeedEstimate]:
-        if self._speed_estimator is None:
+        if not enabled or self._speed_estimator is None:
             return [
                 SpeedEstimate(track_id=None, speed_kmh=None, is_speeding=False)
                 for _ in detections

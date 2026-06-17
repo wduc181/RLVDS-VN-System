@@ -22,6 +22,7 @@ _TWO_LETTER_SERIES = {
     "QT",
     "TD",
 }
+_DIRECT_LEGACY_SERIES_LETTERS = {"B", "E", "L", "P", "V"}
 
 
 def upscale_image(image: np.ndarray, scale: float = 2.0) -> np.ndarray:
@@ -75,15 +76,11 @@ def clean_plate_text(raw_text: str) -> str:
     chars[0] = _to_digit(chars[0])
     chars[1] = _to_digit(chars[1])
 
-    two_letter_series = ""
-    if len(chars) >= 4:
-        two_letter_series = f"{_to_alpha(chars[2])}{_to_alpha(chars[3])}"
-
     # Heuristic to determine prefix end:
     # - 2-digit province + 1 alpha series => prefix len 3
     # - 2-digit province + alpha+digit series (e.g. A1) => prefix len 4
-    # - 2-digit province + special two-letter series (e.g. LD/NN/NG) => prefix len 4
-    if len(chars) >= 4 and two_letter_series in _TWO_LETTER_SERIES:
+    # - 2-digit province + two alpha series (e.g. AB/LD/NN) => prefix len 4
+    if len(chars) >= 4 and chars[2].isalpha() and chars[3].isalpha():
         prefix_end = 4
         two_letter_prefix = True
     elif len(chars) >= 9 and chars[3].isdigit():
@@ -111,25 +108,151 @@ def clean_plate_text(raw_text: str) -> str:
 
 def format_plate(text: str) -> str:
     """Format normalized text to VN-style plate representation."""
-    cleaned = clean_plate_text(text)
-    # If text already contains a hyphen, only accept it as-is if it is a valid plate.
-    if "-" in cleaned:
-        if check_valid_plate(cleaned):
-            return cleaned
-        # Strip hyphens from invalidly formatted text and continue with standard formatting.
-        cleaned = cleaned.replace("-", "")
-
+    direct = re.sub(r"[^A-Za-z0-9.-]", "", text or "").upper().replace(".", "")
     candidates: list[str] = []
-    if len(cleaned) >= 7:
-        candidates.append(f"{cleaned[:3]}-{cleaned[3:]}")
-    if len(cleaned) >= 9:
-        candidates.append(f"{cleaned[:4]}-{cleaned[4:]}")
+    candidates.extend(_direct_plate_candidates(direct))
+    candidates.extend(_separated_plate_candidates(text))
+    candidates.extend(_compact_plate_candidates(re.sub(r"[^A-Z0-9]", "", direct)))
 
-    for candidate in candidates:
+    # Aggressive cleanup is a fallback source, not the single source of truth.
+    # This keeps raw OCR text such as "90AB" from being rewritten to "90A8".
+    cleaned = clean_plate_text(text)
+    candidates.extend(_direct_plate_candidates(cleaned))
+    candidates.extend(_compact_plate_candidates(cleaned.replace("-", "")))
+
+    for candidate in _dedupe(candidates):
         if check_valid_plate(candidate):
             return candidate
 
     return cleaned
+
+
+def _format_separated_plate(text: str) -> str:
+    for candidate in _separated_plate_candidates(text):
+        if check_valid_plate(candidate):
+            return candidate
+    return ""
+
+
+def _direct_plate_candidates(text: str) -> list[str]:
+    candidates = []
+    legacy = _format_direct_legacy_motorbike_plate(text)
+    if legacy:
+        candidates.append(legacy)
+    if len(text.split("-")) == 2:
+        candidates.append(text)
+    return candidates
+
+
+def _separated_plate_candidates(text: str) -> list[str]:
+    normalized = re.sub(r"[^A-Za-z0-9.\-\s]", "", text or "").upper()
+    normalized = normalized.replace(".", "")
+    tokens = re.findall(r"[A-Z0-9]+", normalized)
+    if len(tokens) < 2:
+        return []
+
+    candidates: list[str] = []
+    if len(tokens) >= 3:
+        prefix = _normalize_prefix_parts(tokens[0], tokens[1])
+        tail = _normalize_tail("".join(tokens[2:]))
+        if prefix and tail:
+            candidates.append(f"{prefix}-{tail}")
+
+    tail = _normalize_tail("".join(tokens[1:]))
+    ambiguous_legacy_split = len(tokens) == 2 and len(tokens[0]) == 4 and len(tail) == 4
+    if not ambiguous_legacy_split:
+        prefix = _normalize_prefix_token(tokens[0])
+        if prefix and tail:
+            candidates.append(f"{prefix}-{tail}")
+
+    return candidates
+
+
+def _compact_plate_candidates(text: str) -> list[str]:
+    if not text:
+        return []
+
+    candidates: list[str] = []
+    if re.fullmatch(r"\d{2}[A-Z]{2}\d{4,5}", text):
+        candidates.append(f"{text[:4]}-{text[4:]}")
+    if _prefer_legacy_motorbike_split(text):
+        candidates.append(f"{text[:4]}-{text[4:]}")
+    if len(text) >= 7:
+        candidates.append(f"{text[:3]}-{text[3:]}")
+    if len(text) >= 9:
+        candidates.append(f"{text[:4]}-{text[4:]}")
+    return candidates
+
+
+def _dedupe(candidates: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            unique.append(candidate)
+    return unique
+
+
+def _normalize_prefix_parts(province: str, series: str) -> str:
+    if len(province) != 2:
+        return ""
+    province = "".join(_to_digit(char) for char in province)
+    normalized_series = _normalize_series(series)
+    if not province.isdigit() or not normalized_series:
+        return ""
+    return f"{province}{normalized_series}"
+
+
+def _normalize_prefix_token(prefix: str) -> str:
+    if len(prefix) < 3:
+        return ""
+    province = "".join(_to_digit(char) for char in prefix[:2])
+    series = _normalize_series(prefix[2:])
+    if not province.isdigit() or not series:
+        return ""
+    return f"{province}{series}"
+
+
+def _normalize_series(series: str) -> str:
+    if not series or len(series) > 2:
+        return ""
+    if len(series) == 1:
+        return _to_alpha(series[0])
+
+    first = _to_alpha(series[0])
+    if series[1].isalpha():
+        return f"{first}{_to_alpha(series[1])}"
+    return f"{first}{_to_digit(series[1])}"
+
+
+def _normalize_tail(tail: str) -> str:
+    return "".join(_to_digit(char) for char in tail)
+
+
+def _prefer_legacy_motorbike_split(cleaned: str) -> bool:
+    return bool(
+        re.fullmatch(r"\d{2}[A-Z]\d\d{4}", cleaned)
+        and cleaned[2] in _DIRECT_LEGACY_SERIES_LETTERS
+        and cleaned[3] not in {"0", "1"}
+    )
+
+
+def _format_direct_legacy_motorbike_plate(text: str) -> str:
+    parts = text.split("-")
+    if len(parts) != 2:
+        return ""
+    prefix, tail = parts
+    if not re.fullmatch(r"\d{2}[A-Z]", prefix):
+        return ""
+    if not re.fullmatch(r"\d{5}", tail):
+        return ""
+    if prefix[2] not in _DIRECT_LEGACY_SERIES_LETTERS:
+        return ""
+    if tail[0] in {"0", "1"}:
+        return ""
+    candidate = f"{prefix}{tail[0]}-{tail[1:]}"
+    return candidate if check_valid_plate(candidate) else ""
 
 
 def check_valid_plate(plate: str) -> bool:
@@ -179,15 +302,11 @@ def check_valid_plate(plate: str) -> bool:
 def _valid_plate_prefix(prefix: str) -> bool:
     if re.fullmatch(r"\d{2}[A-Z]\d?", prefix):
         return True
-    return (
-        len(prefix) == 4
-        and prefix[:2].isdigit()
-        and prefix[2:] in _TWO_LETTER_SERIES
-    )
+    return bool(re.fullmatch(r"\d{2}[A-Z]{2}", prefix))
 
 
 def _valid_plate_series(series: str) -> bool:
-    return bool(re.fullmatch(r"[A-Z]\d?", series)) or series in _TWO_LETTER_SERIES
+    return bool(re.fullmatch(r"[A-Z](?:\d|[A-Z])?", series))
 
 
 def to_gray(image: np.ndarray) -> np.ndarray:

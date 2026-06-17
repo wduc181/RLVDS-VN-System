@@ -147,6 +147,8 @@ class CachedPipeline:
         *,
         frame_idx: int | None = None,
         fps: float | None = None,
+        run_ocr: bool = True,
+        estimate_speed: bool = True,
     ) -> List[CachedPipelineResult]:
         """Xử lý một frame với OCR caching.
 
@@ -162,11 +164,18 @@ class CachedPipeline:
         self._frame_idx += 1
         speed_frame_idx = self._frame_idx if frame_idx is None else int(frame_idx)
         detections = self._detector.detect(frame)
-        speed_estimates = self._estimate_speeds(detections, speed_frame_idx, fps)
+        speed_estimates = self._estimate_speeds(
+            detections,
+            speed_frame_idx,
+            fps,
+            enabled=estimate_speed,
+        )
         results: List[CachedPipelineResult] = []
 
         for det, speed in zip(detections, speed_estimates):
-            plate_text, from_cache = self._resolve_plate_text(det, frame)
+            plate_text, from_cache = ("unknown", False)
+            if run_ocr:
+                plate_text, from_cache = self._resolve_plate_text(det, frame)
 
             is_violation = self._violation_detector.check_mock_violation(
                 plate_text=plate_text,
@@ -195,8 +204,10 @@ class CachedPipeline:
         detections: Sequence[Detection],
         frame_idx: int,
         fps: float | None,
+        *,
+        enabled: bool = True,
     ) -> list[SpeedEstimate]:
-        if self._speed_estimator is None:
+        if not enabled or self._speed_estimator is None:
             return [
                 SpeedEstimate(track_id=None, speed_kmh=None, is_speeding=False)
                 for _ in detections
